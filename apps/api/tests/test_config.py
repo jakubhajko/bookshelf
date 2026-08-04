@@ -10,25 +10,12 @@ from book_app.core.config import Settings
 
 def test_development_allows_insecure_defaults() -> None:
     settings = Settings(environment="development")
-    assert settings.jwt_secret_key == "dev-insecure-change-me"
+    assert settings.jwt_secret_key == "dev-insecure-change-me-before-deploying"
 
 
 def test_production_rejects_default_jwt_secret() -> None:
     with pytest.raises(ValidationError, match="jwt_secret_key"):
-        Settings(
-            environment="production",
-            cookie_secure=True,
-            csrf_secret_key="a-real-secret",
-        )
-
-
-def test_production_rejects_default_csrf_secret() -> None:
-    with pytest.raises(ValidationError, match="csrf_secret_key"):
-        Settings(
-            environment="production",
-            cookie_secure=True,
-            jwt_secret_key="a-real-secret",
-        )
+        Settings(environment="production", cookie_secure=True)
 
 
 def test_production_rejects_insecure_cookie() -> None:
@@ -36,7 +23,6 @@ def test_production_rejects_insecure_cookie() -> None:
         Settings(
             environment="production",
             jwt_secret_key="a-real-secret",
-            csrf_secret_key="a-real-secret",
             cookie_secure=False,
         )
 
@@ -46,7 +32,6 @@ def test_production_rejects_demo_mode() -> None:
         Settings(
             environment="production",
             jwt_secret_key="a-real-secret",
-            csrf_secret_key="a-real-secret",
             cookie_secure=True,
             demo_mode_enabled=True,
         )
@@ -56,7 +41,6 @@ def test_production_accepts_secure_configuration() -> None:
     settings = Settings(
         environment="production",
         jwt_secret_key="a-real-secret",
-        csrf_secret_key="another-real-secret",
         cookie_secure=True,
         demo_mode_enabled=False,
     )

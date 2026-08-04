@@ -37,11 +37,25 @@ server-side — CORS configuration is not relied on as the CSRF defense.
 
 ## Consequences
 
-- Every mutating endpoint needs CSRF-token verification wired through
-  `core/dependencies.py`, not just auth endpoints.
+- Every mutating endpoint needs CSRF-token verification wired through a
+  shared `require_csrf` dependency. Implemented (Phase 3) in
+  `modules/auth/dependencies.py`, not `core/dependencies.py` as originally
+  guessed here — CSRF verification needs an `auth_sessions` lookup, which
+  makes it an auth-module concern, not a generic cross-cutting one; other
+  modules import it from there the same way they'll import
+  `get_current_user`.
 - Refresh-session storage means a cleanup job/CLI (`cleanup_sessions`) is
   required to bound table growth from expired sessions — already scheduled
-  in spec §11's CLI command list.
+  in spec §11's CLI command list. Implemented in Phase 3
+  (`make cleanup-sessions`).
 - Cross-origin local development (frontend on Vite's dev server, API on
   FastAPI's) needs exact, credentialed CORS configuration
   (`allow_credentials=True` with an explicit origin list, never `*`).
+- The CSRF token is stored the same way the refresh token is — a
+  high-entropy random value, hashed (SHA-256, not Argon2id — it's a
+  high-entropy token, not a human-chosen secret) for storage/lookup, never
+  recoverable from the database. Confirmed by spec §8.2 itself: it declares
+  a `csrf_token_hash` *column*, which only makes sense for this design (an
+  HMAC-derived CSRF token would be recomputed on the fly, never stored) —
+  see `docs/implementation/plan.md` §6 for the Phase 1 field this decision
+  superseded.

@@ -19,7 +19,11 @@ from typing import Literal, Self
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_INSECURE_DEV_SECRET = "dev-insecure-change-me"  # noqa: S105 - placeholder, not a real credential
+_INSECURE_DEV_SECRET = "dev-insecure-change-me-before-deploying"  # noqa: S105 - placeholder
+# 39 bytes: above PyJWT's 32-byte recommended HS256 key length, so the local
+# dev default doesn't trigger InsecureKeyLengthWarning on every request —
+# still just as "obviously fake," still just as rejected in production by
+# the validator below.
 
 
 class Environment(StrEnum):
@@ -43,13 +47,13 @@ class Settings(BaseSettings):
     database_pool_size: int = 5
     database_pool_max_overflow: int = 10
 
-    # --- JWT / sessions (behavior lands in Phase 3) ---
+    # --- JWT / sessions (Phase 3) ---
     jwt_secret_key: str = _INSECURE_DEV_SECRET
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 15
     refresh_token_days: int = 30
 
-    # --- Cookies (behavior lands in Phase 3) ---
+    # --- Cookies (Phase 3) ---
     cookie_secure: bool = False
     cookie_samesite: Literal["lax", "strict", "none"] = "lax"
     cookie_domain: str | None = None
@@ -57,10 +61,20 @@ class Settings(BaseSettings):
     # --- CORS (wired in Phase 1 middleware) ---
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
-    # --- CSRF (behavior lands in Phase 3) ---
-    csrf_secret_key: str = _INSECURE_DEV_SECRET
+    # --- CSRF (Phase 3) ---
+    # No separate CSRF secret: spec §8.2 stores `csrf_token_hash` on
+    # auth_sessions, which only makes sense for a random-token-hashed-at-rest
+    # design (an HMAC-derived token wouldn't need storing at all) — see
+    # docs/implementation/plan.md §6. Phase 1 provisioned an unused
+    # `csrf_secret_key` field anticipating an HMAC design; removed here now
+    # that CSRF is actually implemented and doesn't need one.
 
-    # --- Cover storage (behavior lands in Phase 2) ---
+    # --- Auth rate limiting (Phase 3) --- pluggable per spec §14; the
+    # in-process default is documented as local-only, see shared/rate_limit.py.
+    auth_rate_limit_max_attempts: int = 10
+    auth_rate_limit_window_seconds: float = 300.0
+
+    # --- Cover storage (Phase 2) ---
     cover_storage_backend: Literal["local", "s3"] = "local"
     cover_storage_local_path: Path = Path("data/processed/covers")
     cover_storage_s3_bucket: str | None = None
@@ -85,8 +99,6 @@ class Settings(BaseSettings):
         insecure: list[str] = []
         if self.jwt_secret_key == _INSECURE_DEV_SECRET:
             insecure.append("jwt_secret_key")
-        if self.csrf_secret_key == _INSECURE_DEV_SECRET:
-            insecure.append("csrf_secret_key")
         if not self.cookie_secure:
             insecure.append("cookie_secure")
         if self.demo_mode_enabled:

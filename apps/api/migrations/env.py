@@ -4,11 +4,13 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 # Importing each module's models registers its tables on Base.metadata.
-# Add the import when a new module gains models (books is the only one so
-# far — Phase 2 is catalog-only, see docs/implementation/plan.md).
+# Add the import when a new module gains models — see
+# docs/implementation/plan.md for which modules have landed so far.
 from book_app.core.config import get_settings
 from book_app.core.database import Base
+from book_app.modules.auth import models as auth_models  # noqa: F401
 from book_app.modules.books import models as books_models  # noqa: F401
+from book_app.modules.users import models as users_models  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

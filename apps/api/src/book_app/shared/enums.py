@@ -11,3 +11,11 @@ class CatalogStatus(StrEnum):
     ACTIVE = "ACTIVE"
     HIDDEN = "HIDDEN"
     INVALID = "INVALID"
+
+
+class AccountStatus(StrEnum):
+    """User account state (spec §8.1)."""
+
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+    PENDING_DELETION = "PENDING_DELETION"

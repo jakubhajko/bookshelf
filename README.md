@@ -74,6 +74,7 @@ make lint                   ruff (backend/recommender/tests) + oxlint (frontend)
 make typecheck              mypy (backend/recommender) + tsc (frontend)
 make migrate                 apply Alembic migrations
 make import-data[-dry-run]   import books.parquet into PostgreSQL
+make cleanup-sessions        delete expired/revoked auth sessions
 make seed-demo               demo user/data (Phase 4+)
 make build-popularity        popularity recommendation artifact (Phase 5)
 make e2e                     Playwright critical-flow tests (Phase 9)
@@ -85,18 +86,16 @@ exit 0 rather than fail — see `docs/implementation/plan.md` §6.
 
 ## Current status
 
-Phases 0-2 are complete: monorepo foundations (config, logging, health
-endpoints, CI, a Vite/React/TypeScript shell), plus the full catalog data
-layer — SQLAlchemy models and Alembic migrations for books/authors/genres/
-shelf-tags/similarities, a dataset adapter + CLI that imports
-`books.parquet` into PostgreSQL (idempotent, batched, dry-run capable,
-report-generating), trigram/full-text search indexes, and local cover
-storage. The full 92,526-book catalog has been imported and verified
-end-to-end, including a live fuzzy-search check against the trigram index.
-Authentication, product API endpoints, and UI don't exist yet — see the
-phase-by-phase plan and acceptance checklist in
-[`docs/implementation/plan.md`](docs/implementation/plan.md) for exactly
-what's done versus what Phase 3 onward adds.
+Phases 0-3 are complete: monorepo foundations, the full catalog data layer
+(92,526 books imported, search indexes proven against a live fuzzy query),
+and authentication — register/login/refresh/logout/me/change-password
+(spec §9.1), Argon2id passwords, HttpOnly cookie sessions with DB-backed
+revocable refresh sessions, session-bound CSRF, and a pluggable per-IP/
+per-username login rate limiter. 97 tests (69 unit + 28 integration against
+real PostgreSQL). Shelves, ratings, book detail, recommendations, and all
+product UI don't exist yet — see the phase-by-phase plan and acceptance
+checklist in [`docs/implementation/plan.md`](docs/implementation/plan.md)
+for exactly what's done versus what Phase 4 onward adds.
 
 ## AWS design
 

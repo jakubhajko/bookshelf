@@ -75,6 +75,9 @@ import-data: ## Import books.parquet (catalog + taxonomy) into PostgreSQL
 import-data-dry-run: ## Validate the dataset without writing to PostgreSQL
 	cd apps/api && uv run python -m book_app.cli.import_catalog --dry-run
 
+cleanup-sessions: ## Delete expired/revoked auth sessions
+	cd apps/api && uv run python -m book_app.cli.cleanup_sessions
+
 seed-demo: ## Create the local demo user with representative shelves/ratings/saves
 	@echo "Not implemented yet - lands in Phase 4+ (see docs/implementation/plan.md)."
 

@@ -20,6 +20,8 @@ from book_app.core.exceptions import register_exception_handlers
 from book_app.core.health import router as health_router
 from book_app.core.logging import configure_logging, get_logger
 from book_app.core.middleware import RequestContextMiddleware, configure_cors
+from book_app.modules.auth.api import router as auth_router
+from book_app.modules.auth.dependencies import build_auth_rate_limiter
 
 API_PREFIX = "/api/v1"
 
@@ -43,12 +45,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved_settings
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
+    app.state.auth_rate_limiter = build_auth_rate_limiter(resolved_settings)
 
     configure_cors(app, resolved_settings)
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
 
     app.include_router(health_router, prefix=API_PREFIX)
+    app.include_router(auth_router, prefix=API_PREFIX)
 
     return app
 

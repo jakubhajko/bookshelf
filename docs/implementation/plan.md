@@ -207,12 +207,60 @@ Phases mirror spec §18 exactly. Status is updated as work lands.
   directly, consistent with spec §6.7 ("historical users are not
   application users").
 
-### Phase 3 — Authentication — not started
+### Phase 3 — Authentication — **done, this pass**
 
-Username rules (§6.2), Argon2id, register/login, HttpOnly cookies, DB-backed
-refresh sessions, CSRF, logout, session cleanup CLI, tests. This is where
-`core/security.py` and the JWT approach get finalized (see plan §6 assumption
-on the JWT library).
+- **`modules/users`**: `User` model (spec §8.1, native `account_status`
+  enum); `username_rules.py` — pure validation (length, Unicode
+  letter/digit/underscore/hyphen only, no leading/trailing whitespace, no
+  control/format characters, reserved-name list, case/Unicode-fold
+  uniqueness via the same `normalize_for_uniqueness` Phase 2 already uses)
+  independent of any database session; `repository.py`; `UserPublic`
+  schema (id + username only — never the password hash).
+- **`modules/auth`**: `AuthSession` model (spec §8.2); `service.py` owns
+  every use case and its own transaction (register, login, refresh,
+  logout, change-password); `dependencies.py` — `get_access_token_claims`
+  → `get_current_session` → `get_current_user`/`require_csrf`, sharing one
+  FastAPI-cached dependency chain; `cookies.py` — HttpOnly access/refresh,
+  readable CSRF cookie (spec §6.4-§6.5), refresh cookie scoped to
+  `/api/v1/auth` only; `api.py` — all six endpoints (spec §9.1).
+- **`core/security.py`**: Argon2id (explicit `Type.ID`, spec §6.3) for
+  passwords; SHA-256 for refresh/CSRF token storage/lookup — a fast
+  deterministic hash is correct there (high-entropy random tokens, not
+  human-guessable secrets), Argon2id is reserved for passwords only; a
+  focused JWT (`sub`, `sid`, `iat`, `exp` — nothing else) via `pyjwt`,
+  confirming the Phase 1 plan (§6 risk 4).
+- **`shared/rate_limit.py`**: pluggable `RateLimiter` protocol + an
+  in-process fixed-window default, applied to login (keyed by IP +
+  normalized username) and register (keyed by IP) — spec §14's "pluggable
+  auth rate-limit boundary," with AWS WAF/shared-store limiting documented
+  as the production swap-in, not built.
+- **CSRF**: session-bound, random-token-hashed-at-rest (matches spec
+  §8.2's `csrf_token_hash` column existing at all — an HMAC-derived design
+  wouldn't need to store anything). Rotated on every `/auth/refresh` call
+  (spec §6.5: "rotate when appropriate"). Applied to logout and
+  change-password; not to register/login (no session yet to bind to) or
+  refresh (an attacker triggering a refresh cross-site gains nothing — they
+  can't read the HttpOnly response cookies it sets).
+- **`cli/cleanup_sessions.py`** (`make cleanup-sessions`): deletes
+  expired-or-revoked `auth_sessions` rows; dry-run capable.
+- **Migration** (`4a6ac23b959d`): `account_status` enum + `users` +
+  `auth_sessions`, indexed per spec §8.2 ("user/revoked/expiry and
+  expiry"). Verified with the same empty-db round trip as Phase 2 — and
+  confirmed the hand-written catalog search indexes from migration
+  `43bc30e307a2` survive it (autogenerate initially proposed dropping them,
+  since they aren't represented in any model; stripped from this migration
+  before applying — see the file's own docstring).
+- **Tests**: 36 new unit tests (username rules, password/token/JWT
+  primitives, rate limiter — all with no database) + 16 new integration
+  tests (full HTTP lifecycle, CSRF accepted/rejected, duplicate/reserved
+  usernames, disabled accounts, session-cleanup repository logic, and two
+  checks the schema doesn't just describe: refresh/CSRF/password values
+  are genuinely unrecoverable from what's stored). 69 unit + 28 integration
+  total across the whole backend now.
+- **Not built**: security headers, general (non-auth) request rate
+  limiting, and CSRF-cascaded revocation of a user's *other* sessions on
+  password change — all explicitly Phase 9 scope or a documented,
+  deliberately out-of-scope enhancement (see §6).
 
 ### Phase 4 — Books/state/shelves — not started
 
@@ -259,8 +307,8 @@ on the basis of intent, only of a passing command.
 
 ### Functional
 
-- [ ] Username/password registration and persistent login state
-- [ ] Logout/login preserves shelves/history
+- [x] Username/password registration and persistent login state (register/login/refresh/logout/me/change-password all live and integration-tested against real PostgreSQL — spec §9.1)
+- [ ] Logout/login preserves shelves/history (login persistence itself works; shelves/history don't exist yet — Phase 4)
 - [x] Parquet catalog import (`make import-data`; full 92,526-row catalog imported and verified — see Phase 2)
 - [x] Local covers resolvable (`LocalFileStorage`, integration-tested against real files; no HTTP endpoint serving them yet — that's Phase 4)
 - [ ] Home feed through provider
@@ -280,11 +328,11 @@ on the basis of intent, only of a passing command.
 
 ### Architecture
 
-- [x] Modular monolith skeleton (`apps/api/src/book_app/{core,shared,modules,cli}` — `modules/books` and `cli/import_catalog.py` now have real Phase 2 content; `modules/{auth,users,shelves,interactions,search,recommendations}` still don't exist, each appears with its first real file starting Phase 3+)
+- [x] Modular monolith skeleton (`apps/api/src/book_app/{core,shared,modules,cli}` — `modules/books`, `modules/users`, `modules/auth` now have real content; `modules/{shelves,interactions,search,recommendations}` still don't exist, each appears with its first real file starting Phase 4+)
 - [x] No frontend DB access (frontend has no DB driver/credentials; talks HTTP only)
 - [ ] No recommender logic in routes (nothing to violate yet — no recommender logic exists)
 - [x] Recommender package independent of FastAPI/ORM (zero such dependencies declared in `packages/recommender/pyproject.toml`; verified by a repo-hygiene test)
-- [x] Service-owned transactions (no `service.py` yet — Phase 4 introduces the first one — but the same principle already holds one layer down: `repository.py` never commits, `cli/import_catalog.py` owns every transaction, exactly mirroring the rule Phase 4's services will follow)
+- [x] Service-owned transactions (`modules/auth/service.py` is the first real `service.py`: every use case calls `session.commit()` itself; `repository.py` files never commit, matching spec §4.2 exactly — no longer just "the same principle one layer down," an actual service now)
 - [ ] Append-only events (not implemented — Phase 4)
 - [x] Environment config (typed `Settings` covering every §11 category)
 - [x] Storage abstractions (`ObjectStorage` protocol + `LocalFileStorage`, spec §7.3; S3 implementation deferred, see §6)
@@ -292,8 +340,8 @@ on the basis of intent, only of a passing command.
 
 ### Quality
 
-- [x] Empty-db migrations (`tests/integration/test_migrations.py`: fresh database, `upgrade head`, plus an explicit `downgrade base` → `upgrade head` round trip)
-- [x] Critical tests for what exists (health endpoints, config validation, storage safety, catalog import correctness/idempotency/rejection, migrations — 32 tests total, 91% combined coverage on `book_app`)
+- [x] Empty-db migrations (`tests/integration/test_migrations.py`: fresh database, `upgrade head`, plus an explicit `downgrade base` → `upgrade head` round trip; re-verified after adding the Phase 3 migration)
+- [x] Critical tests for what exists (health, config, storage safety, catalog import, migrations, username rules, password/token/JWT primitives, rate limiting, full auth HTTP lifecycle, CSRF, session persistence/hashing — 97 tests total: 69 unit + 28 integration; 91%+ combined coverage on `book_app`)
 - [ ] E2E flow (Phase 9)
 - [x] Lint/type/build success for everything created this pass, including `tests/integration` (see §5 command log)
 - [x] No secrets committed (`.env` gitignored, only `.env.example` with fake values tracked)
@@ -379,6 +427,34 @@ uv run python -m book_app.cli.import_catalog
 
 Future phases append their own validation block here instead of replacing
 this one (spec §18: "run tests after each phase").
+
+## 5b. Phase 3 validation commands and results
+
+```bash
+# Migrations (adds account_status/users/auth_sessions on top of Phase 2's schema)
+make db-start
+cd apps/api
+uv run alembic upgrade head
+uv run alembic downgrade base && uv run alembic upgrade head   # full round trip again
+
+# Lint/types (now includes users/auth modules, security, rate limiting)
+uv run ruff format --check . && uv run ruff check .
+uv run mypy .
+
+# Unit tests (69) + integration tests (28) + combined coverage
+uv run pytest -q                                                          # unit only
+uv run pytest tests ../../tests/integration --cov=book_app --cov-report=term-missing
+cd ../.. && uv run --project apps/api ruff format --check tests && uv run --project apps/api ruff check tests
+
+# Live smoke test against real Postgres (what actually found the bugs in §6)
+cd apps/api
+uv run uvicorn book_app.main:app --host 127.0.0.1 --port 8010 &
+curl -sc /tmp/c -X POST http://127.0.0.1:8010/api/v1/auth/register -H "Content-Type: application/json" \
+  -d '{"username":"demo","password":"correct horse battery staple","password_confirmation":"correct horse battery staple"}'
+curl -sc /tmp/c -b /tmp/c -X POST http://127.0.0.1:8010/api/v1/auth/login -H "Content-Type: application/json" \
+  -d '{"username":"demo","password":"correct horse battery staple"}'
+curl -s -b /tmp/c http://127.0.0.1:8010/api/v1/auth/me
+```
 
 ## 6. Risks and assumptions
 
@@ -505,9 +581,63 @@ conservative, reversible default and document it."
     text files under the real filenames instead — `test_local_covers.py`
     only checks file existence and safe path resolution, never image bytes,
     so this is equally good as a fixture. See `data/README.md`.
+20. **`csrf_secret_key` (provisioned in Phase 1's `Settings`) was removed,
+    not implemented.** Phase 1 anticipated an HMAC-derived CSRF design.
+    Actually building CSRF in Phase 3 showed spec §8.2's `csrf_token_hash`
+    *column* only makes sense for a random-token-hashed-at-rest design (an
+    HMAC token is recomputed, never stored) — so the field was dead weight.
+    Removed from `Settings`, `.env.example`, and the production-safety
+    validator rather than implemented-to-match-the-field. A real example of
+    "genuinely unspecified detail" resolving itself once actually built.
+21. **`InvalidHashError` isn't an `Argon2Error` subclass** — it derives
+    directly from `ValueError`. Assumed otherwise from `VerifyMismatchError`'s
+    MRO without checking `InvalidHashError`'s separately; a unit test
+    (`test_verify_password_rejects_garbage_hash_without_raising`) caught the
+    gap before it could turn a corrupt stored hash into an unhandled 500 on
+    login. `verify_password` now catches both explicitly.
+22. **`get_current_user` originally didn't check session validity, only the
+    JWT and account status** — meaning a logged-out user's still-cryptographically-valid
+    access token would keep working on every authenticated GET route
+    (`/auth/me`, and everything Phase 4+ adds) for up to its ~15-minute
+    natural lifetime. Found by live-smoke-testing the actual logout flow
+    with curl, not by unit testing (the bug was in what the dependency
+    *didn't* check, which a test written against the original design
+    wouldn't have caught either). Fixed by extracting a shared
+    `get_current_session` dependency that both `get_current_user` and
+    `require_csrf` depend on — revocation is now immediate, verified by
+    `test_replayed_access_token_is_rejected_immediately_after_logout`.
+23. **HTTP 422's status constant was renamed** (`HTTP_422_UNPROCESSABLE_ENTITY`
+    → `HTTP_422_UNPROCESSABLE_CONTENT`) in the Starlette version this
+    environment resolved — a `DeprecationWarning` surfaced by running the
+    unit suite, fixed across all four usages (`core/exceptions.py` plus
+    three auth/users exception classes). Same numeric status code (422),
+    just the current constant name.
+24. **Password rules are validated in `service.py`, not via Pydantic field
+    constraints**, deliberately — see `service.py`'s and `schemas.py`'s
+    module docstrings. A Pydantic `ValidationError`'s `.errors()` includes
+    the raw submitted value for the failing field, and my shared error
+    handler (`core/exceptions.py`) puts `.errors()` straight into the
+    response's `details`. For a password field, that would echo the
+    password back to the client on a length-validation failure — a direct
+    violation of spec §6.3 ("never log or return"). Usernames don't have
+    this problem (they aren't secret), so only password fields skip Pydantic
+    constraints.
+25. **Session revocation cascade on password change wasn't built.** Spec
+    §6's Phase 3 bullet list is "cookies/refresh; CSRF; logout; session
+    cleanup" — it doesn't ask for change-password to revoke a user's *other*
+    active sessions, and I didn't add it unasked. Worth reconsidering later
+    as a real hardening improvement (if a password was changed because it
+    leaked, other sessions started with the leaked password should
+    arguably die too) — flagged here rather than silently decided either way.
+26. **Rate limiting is scoped to login (per IP+username) and register (per
+    IP) only** — not refresh/logout/change-password, which all require an
+    already-valid session and so have a much smaller brute-force surface.
+    General, non-auth-specific API rate limiting is explicitly Phase 9
+    scope (spec §18).
 
 ## 7. Next phase
 
-**Phase 3 — Authentication.** Username rules (§6.2), Argon2id, register/login,
-HttpOnly cookies, DB-backed refresh sessions, CSRF, logout, session cleanup
-CLI, tests. Do not start without explicit instruction.
+**Phase 4 — Books/state/shelves.** Book detail endpoint, rating/Not-Interested
+state machine (§5.2-§5.3) with append-only events, shelves CRUD, multi-shelf
+sync endpoint, `/me/ratings`, authorization/ownership tests. Do not start
+without explicit instruction.

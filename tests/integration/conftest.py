@@ -15,6 +15,9 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
+from book_app.core.config import Settings
+from book_app.main import create_app
+from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine, make_url, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -87,13 +90,27 @@ def test_session_factory(test_engine: Engine) -> sessionmaker[Session]:
 
 
 @pytest.fixture(autouse=True)
-def _clean_catalog_tables(test_engine: Engine) -> None:
+def _clean_all_tables(test_engine: Engine) -> None:
     """Truncate before each test — a clean slate regardless of prior test outcomes."""
     with test_engine.begin() as conn:
         conn.execute(
             text(
-                "TRUNCATE TABLE book_source_similarities, book_catalog_shelf_tags, "
+                "TRUNCATE TABLE auth_sessions, users, "
+                "book_source_similarities, book_catalog_shelf_tags, "
                 "book_genres, book_authors, catalog_shelf_tags, genres, authors, books "
                 "RESTART IDENTITY CASCADE"
             )
         )
+
+
+@pytest.fixture
+def test_settings(test_database_url: str) -> Settings:
+    return Settings(environment="test", database_url=test_database_url)
+
+
+@pytest.fixture
+def client(test_settings: Settings) -> Iterator[TestClient]:
+    """An HTTP client for the real app, wired to the integration test database."""
+    app = create_app(settings=test_settings)
+    with TestClient(app) as test_client:
+        yield test_client
