@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DATABASE_URL: postgresql+psycopg://book_app:book_app@localhost:5432/book_app
+  PGHOST: localhost
+  PGPORT: "5432"
+  PGUSER: book_app
+  PGPASSWORD: book_app
+  PGDATABASE: book_app
+
+jobs:
+  backend:
+    name: Backend (lint, types, tests)
+    runs-on: ubuntu-latest
+    # CI must apply migrations to empty PostgreSQL (spec §13.6) — the
+    # integration test step below does exactly that against this service
+    # container (tests/integration/conftest.py creates its own database and
+    # runs `alembic upgrade head` against it fresh every run).
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: book_app
+          POSTGRES_PASSWORD: book_app
+          POSTGRES_DB: book_app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U book_app -d book_app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.10.4"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Enable pg_trgm
+        run: psql -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+
+      - name: ruff format --check (apps/api)
+        run: cd apps/api && uv run ruff format --check .
+      - name: ruff check (apps/api)
+        run: cd apps/api && uv run ruff check .
+      - name: mypy (apps/api)
+        run: cd apps/api && uv run mypy .
+      - name: pytest (apps/api)
+        run: cd apps/api && uv run pytest --cov=book_app --cov-report=term-missing
+
+      - name: ruff format --check (packages/recommender)
+        run: cd packages/recommender && uv run ruff format --check .
+      - name: ruff check (packages/recommender)
+        run: cd packages/recommender && uv run ruff check .
+      - name: mypy (packages/recommender)
+        run: cd packages/recommender && uv run mypy .
+      - name: pytest (packages/recommender)
+        run: cd packages/recommender && uv run pytest
+
+      - name: ruff format --check (tests/integration)
+        run: uv run --project apps/api ruff format --check tests
+      - name: ruff check (tests/integration)
+        run: uv run --project apps/api ruff check tests
+      - name: pytest (tests/integration, real PostgreSQL)
+        run: cd apps/api && uv run pytest ../../tests/integration -v
+
+      - name: Boot the API and smoke-test health endpoints
+        run: |
+          cd apps/api
+          uv run uvicorn book_app.main:app --host 127.0.0.1 --port 8000 &
+          API_PID=$!
+
+          ready=""
+          for _ in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:8000/api/v1/health/live > /dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ -z "$ready" ]; then
+            echo "API never became reachable" >&2
+            kill "$API_PID" || true
+            exit 1
+          fi
+
+          echo "-- /api/v1/health/live --"
+          curl -sf http://127.0.0.1:8000/api/v1/health/live
+          echo
+          echo "-- /api/v1/health/ready --"
+          curl -sf http://127.0.0.1:8000/api/v1/health/ready
+          echo
+
+          kill "$API_PID"
+
+  frontend:
+    name: Frontend (lint, types, tests, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build

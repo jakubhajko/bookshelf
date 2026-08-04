@@ -1,0 +1,19 @@
+# apps/api's Docker build context is the repo root (it needs the workspace
+# pyproject.toml + uv.lock) — without this file, `docker build` would ship
+# the entire dataset (~10 GB, see data/README.md) to the daemon as context.
+.git
+.venv
+.pgdata
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/dist
+**/.vite
+data/raw
+data/processed
+data/notebooks
+.DS_Store
+.env

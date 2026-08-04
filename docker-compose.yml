@@ -1,0 +1,66 @@
+# Local development stack (spec §16). Not runtime-verified in this
+# environment — Docker is not installed (see docs/implementation/plan.md §6
+# risks); validated instead by parsing this file and by running the app
+# natively against a project-local Postgres cluster (`make db-start`).
+#
+# Config comes from the repo-root `.env` (copy `.env.example`); DATABASE_URL
+# below is composed from the same DB_* values `.env` sets so the api
+# container talks to the `db` service instead of localhost.
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: ${DB_USER:-book_app}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-book_app}
+      POSTGRES_DB: ${DB_NAME:-book_app}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./infra/docker/postgres/init-extensions.sql:/docker-entrypoint-initdb.d/init-extensions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-book_app} -d ${DB_NAME:-book_app}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${DB_USER:-book_app}:${DB_PASSWORD:-book_app}@db:5432/${DB_NAME:-book_app}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./apps/api:/workspace/apps/api
+      - ./packages/recommender:/workspace/packages/recommender
+      # Local storage backends (spec §7.3, §10.13) — read-only, never written
+      # to by the api container.
+      - ./data/processed/covers:/workspace/data/processed/covers:ro
+      - ./data/artifacts:/workspace/data/artifacts:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./apps/web:/app
+      # Anonymous volume so the container's own (Linux) node_modules isn't
+      # shadowed by the host bind mount above (host is macOS/ARM here).
+      - /app/node_modules
+    depends_on:
+      - api
+
+volumes:
+  db-data:

@@ -1,0 +1,63 @@
+# --- Dataset (large / regeneratable, see data/README.md) ---
+/data/raw/
+/data/processed/
+/data/notebooks/.feature_cache.pkl
+/data/notebooks/.ipynb_checkpoints/
+# Generated model artifacts (Phase 5+) — regeneratable via `make build-popularity`:
+/data/artifacts/*
+!/data/artifacts/.gitkeep
+# Sample fixtures ARE tracked (small, hand-curated for tests):
+!/data/sample/
+!/data/sample/**
+
+# --- Python ---
+__pycache__/
+*.py[oc]
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+uv.lock.tmp
+
+# --- Node / frontend ---
+node_modules/
+apps/web/dist/
+apps/web/.vite/
+apps/web/coverage/
+apps/web/playwright-report/
+apps/web/test-results/
+*.tsbuildinfo
+
+# --- Env / secrets ---
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- Local Postgres (project-local dev cluster, see Makefile db-start/db-stop) ---
+.pgdata/
+
+# --- Local cover/artifact storage roots used by dev config ---
+/var/covers/
+/var/artifacts/
+
+# --- Editors / OS ---
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# --- Logs ---
+*.log
+npm-debug.log*

@@ -1,0 +1,7 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens (background, surface, text, border, accent, radii, sidebar,
+ * top bar) land in Phase 6 with the dark design system (ADR-0008). This file
+ * intentionally stays minimal until then.
+ */

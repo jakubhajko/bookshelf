@@ -1,0 +1,12 @@
+[project]
+name = "book-recommender-workspace"
+version = "0.1.0"
+description = "Monorepo workspace root for the book discovery application (see APP_SPECIFICATION.md)."
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["apps/api", "packages/recommender"]
+
+[tool.uv]
+package = false
