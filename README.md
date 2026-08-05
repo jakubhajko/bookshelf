@@ -86,45 +86,46 @@ exit 0 rather than fail — see `docs/implementation/plan.md` §6.
 
 ## Current status
 
-Phases 0-7 are complete: monorepo foundations, the full catalog data layer
-(92,526 books imported, search indexes proven against a live fuzzy query),
-authentication — register/login/refresh/logout/me/change-password (spec
-§9.1), Argon2id passwords, HttpOnly cookie sessions with DB-backed revocable
-refresh sessions, session-bound CSRF, and a pluggable per-IP/per-username
-login rate limiter — books/state/shelves: book detail (`GET /books/{id}`),
-half-star ratings and Not Interested with the full spec §5.2-§5.3 state
-machine and append-only event log, shelves CRUD with atomic multi-shelf
-sync, and `/me/ratings` (all 5 sorts, rating-range/genre filters, cursor
-pagination) — the recommendation boundary: `packages/recommender`
-(typed contracts, mock/popularity/future-pipeline engines, in-process/
-fallback/remote providers, artifact manifest + local storage), a
-Bayesian-shrunk popularity ranking CLI (`make build-popularity`), and all
-three recommendation endpoints (`GET /recommendations/home`,
-`.../shelves/{id}`, `.../books/{id}/similar`) with persisted, cursor
--paginated batches and product-eligibility exclusion (spec §5.5) — the
-frontend shell and auth flow: a generated, fully-typed API client, the dark
-design token system, register/login/account pages, `AuthProvider`, and the
-navigation shell with every spec §12.3 route wired behind the appropriate
-auth guard — and now the core visual product: a real, cover-image-serving
-backend route (`GET /api/v1/covers/{object_key}`, ADR-0011 — the app
-renders actual book covers now, not placeholders), a responsive masonry
-Home feed with infinite scroll wired to `GET /recommendations/home`, book
-cards with a searchable/multi-select/create-capable shelf selector and a
-Pinterest-style Save/Saved quick action, and book detail — as both a
-route-backed modal (desktop) and a full page (direct navigation/mobile) —
-with an accessible half-star rating control, a Not-Interested control that
-confirms before clearing an existing rating, and a similar-books grid,
-all wired with optimistic updates and rollback on failure (spec §12.11).
+Phases 0-8 are complete — every functional surface in spec §19 now has
+both a real backend endpoint and a rendered frontend page. Backend:
+monorepo foundations; the full catalog data layer (92,526 books imported);
+authentication (register/login/refresh/logout/me/change-password, Argon2id,
+HttpOnly cookie sessions, session-bound CSRF, auth rate limiting); books/
+state/shelves (ratings and Not Interested with the full spec §5.2-§5.3
+state machine, shelves CRUD with atomic multi-shelf sync, `/me/ratings`);
+the recommendation boundary (`packages/recommender` — typed contracts,
+mock/popularity/future-pipeline engines, fallback provider chain — plus
+all three recommendation endpoints with persisted, cursor-paginated
+batches); cover image serving (`GET /api/v1/covers/{object_key}`,
+ADR-0011); and search (`GET /search/books`, spec §9.6's seven-tier ranking
+over the trigram/full-text indexes built in Phase 2, ADR-0012). Frontend:
+the auth flow and navigation shell; a responsive masonry grid used
+everywhere books are listed (Home, Similar, Shelf-books, Shelf-discover,
+Rated, Search) with infinite scroll, optimistic updates and rollback
+(spec §12.11), and accurate state badges wherever a book can arrive
+already rated/saved/Not-Interested; book detail as both a route-backed
+modal and a full page, with an accessible half-star rating control and a
+confirm-before-clearing Not-Interested control; shelves (collage overview,
+create/rename/edit-description/delete, Books/Discover tabs); the Rated
+page (all 5 sorts, rating-range/genre filters); and search (debounced
+suggestions, recent searches, URL-encoded query state).
+
 293 tests (118 apps/api unit + 100 integration + 38 recommender package
-against real PostgreSQL + 37 frontend), 94% combined backend coverage. The frontend routes beyond Home/detail (search, shelves, rated)
-are still placeholders — see the phase-by-phase plan and acceptance
-checklist in [`docs/implementation/plan.md`](docs/implementation/plan.md)
-for exactly what's done versus what Phase 8 onward adds. Frontend UI has
-been verified via a production build, 37 component/integration tests, and
-an HTTP-level smoke test against the live backend (which caught and fixed a
-real cover-image path-resolution bug, plan.md risk #47) — not via an
-interactive browser, none is available in this environment (plan.md risk
-#44).
+against real PostgreSQL + 37 frontend) at the Phase 7 handoff, growing to
+326 with Phase 8's additions (12 new backend search tests, 21 new frontend
+tests: 230 apps/api + 38 recommender + 58 frontend) — see
+[`docs/implementation/plan.md`](docs/implementation/plan.md) §5g for exact
+counts and coverage. Only Phase 9 (hardening)
+remains: Playwright E2E, an automated accessibility audit, security
+headers and general rate limiting, verified production Docker builds, demo
+seed data, and a final acceptance run against spec §19 in full — see the
+phase-by-phase plan and acceptance checklist in
+[`docs/implementation/plan.md`](docs/implementation/plan.md) for exactly
+what's done. Frontend UI has been verified via production builds, 58
+component/integration tests, and HTTP-level smoke tests against the live
+backend on real data (which caught and fixed a real cover-image
+path-resolution bug in Phase 7, plan.md risk #47) — not via an interactive
+browser, none is available in this environment (plan.md risk #44).
 
 ## AWS design
 

@@ -1,15 +1,32 @@
-import { Bookmark } from 'lucide-react'
+import { Bookmark, EyeOff, Star } from 'lucide-react'
 import { useState, type MouseEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router'
-import type { RecommendationBookItem } from '../api/recommendations'
 import { useBookState, useSyncShelvesMutation } from '../hooks/useBookState'
 import { useLastUsedShelf } from '../hooks/useLastUsedShelf'
 import { resolveBackgroundLocation } from '../routing/modalNavigation'
 import { BookCover } from './BookCover'
 import { ShelfSelectorPopover } from './ShelfSelectorPopover'
 
+/** Minimal shape every card-rendering surface's item satisfies —
+ * `RecommendationBookItem` (Home/Similar/Shelf-discover) and
+ * `SearchResultItem` (Search) both have at least these fields, so either
+ * can be passed here directly without a conversion step. */
+export interface BookCardData {
+  book_id: number
+  work_id: string
+  title: string
+  primary_author_name: string | null
+  cover_object_key: string | null
+}
+
 interface BookCardProps {
-  book: RecommendationBookItem
+  book: BookCardData
+  /** Shelf-discover context (spec §12.8: "defaults Save to current
+   * shelf") — takes precedence over the session's last-used shelf for
+   * this card's quick-Save action only. Saving here still updates the
+   * session's last-used shelf for every other surface, since it *is* now
+   * the most recently used one. */
+  defaultShelfId?: string
 }
 
 const OVERLAY_VISIBILITY =
@@ -22,14 +39,15 @@ const OVERLAY_VISIBILITY =
  * devices are, imperfectly but reasonably, approximated by narrow
  * viewports here rather than feature-detecting touch support directly.
  */
-export function BookCard({ book }: BookCardProps) {
+export function BookCard({ book, defaultShelfId }: BookCardProps) {
   const navigate = useNavigate()
   const location = useLocation()
-  const { shelf_ids: shelfIds } = useBookState(book.book_id)
+  const { rating, not_interested: notInterested, shelf_ids: shelfIds } = useBookState(book.book_id)
   const syncShelves = useSyncShelvesMutation(book.book_id)
-  const [lastUsedShelfId] = useLastUsedShelf()
+  const [lastUsedShelfId, setLastUsedShelfId] = useLastUsedShelf()
   const [shelfSelectorOpen, setShelfSelectorOpen] = useState(false)
   const saved = shelfIds.length > 0
+  const quickSaveShelfId = defaultShelfId ?? lastUsedShelfId
 
   function openDetail() {
     void navigate(`/books/${book.book_id}`, {
@@ -45,8 +63,9 @@ export function BookCard({ book }: BookCardProps) {
       setShelfSelectorOpen(true)
       return
     }
-    if (lastUsedShelfId) {
-      syncShelves.mutate([...shelfIds, lastUsedShelfId])
+    if (quickSaveShelfId) {
+      syncShelves.mutate([...shelfIds, quickSaveShelfId])
+      setLastUsedShelfId(quickSaveShelfId)
     } else {
       // No shelf established yet this session — nothing to quick-save to,
       // so fall through to the same picker the shelf-selector button opens.
@@ -93,6 +112,24 @@ export function BookCard({ book }: BookCardProps) {
           {saved ? 'Saved' : 'Save'}
         </button>
       </div>
+
+      {/* Persistent (not hover-gated) state badges (spec §12.6) — passive
+       * info, not a control, so unlike the overlay above these are always
+       * visible. Home/Similar cards never show either (spec §5.5
+       * guarantees Neutral/unsaved), but Search/Rated/Shelf-books results
+       * can arrive already rated or Not Interested. */}
+      {notInterested && (
+        <span className="pointer-events-none absolute bottom-2 left-2 flex items-center gap-1 rounded-full bg-surface/90 px-2 py-1 text-xs text-text-muted">
+          <EyeOff aria-hidden className="h-3 w-3" />
+          Not interested
+        </span>
+      )}
+      {!notInterested && rating !== null && (
+        <span className="pointer-events-none absolute bottom-2 left-2 flex items-center gap-1 rounded-full bg-surface/90 px-2 py-1 text-xs font-medium text-text">
+          <Star aria-hidden fill="currentColor" className="h-3 w-3 text-accent" />
+          {rating}
+        </span>
+      )}
     </div>
   )
 }

@@ -9,6 +9,8 @@ export const queryKeys = {
   },
   shelves: {
     list: ['shelves'] as const,
+    detail: (shelfId: string) => ['shelves', shelfId, 'detail'] as const,
+    books: (shelfId: string) => ['shelves', shelfId, 'books'] as const,
   },
   books: {
     detail: (bookId: number) => ['books', bookId, 'detail'] as const,
@@ -22,5 +24,17 @@ export const queryKeys = {
   recommendations: {
     home: ['recommendations', 'home'] as const,
     similar: (bookId: number) => ['recommendations', bookId, 'similar'] as const,
+    shelf: (shelfId: string) => ['recommendations', 'shelf', shelfId] as const,
+  },
+  ratings: {
+    list: (params: {
+      sort: string
+      minRating: number | null
+      maxRating: number | null
+      genre: string | null
+    }) => ['ratings', 'list', params] as const,
+  },
+  search: {
+    results: (query: string) => ['search', 'results', query] as const,
   },
 } as const

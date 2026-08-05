@@ -1,7 +1,6 @@
 import { useMemo } from 'react'
-import type { RecommendationBookItem } from '../api/recommendations'
 import { useColumnCount } from '../hooks/useColumnCount'
-import { BookCard } from './BookCard'
+import { BookCard, type BookCardData } from './BookCard'
 import { CardSkeleton } from './CardSkeleton'
 
 function distributeIntoColumns<T>(items: T[], columnCount: number): T[][] {
@@ -23,7 +22,14 @@ function distributeIntoColumns<T>(items: T[], columnCount: number): T[][] {
  * shortest-column-fill algorithm it doesn't need to measure real image
  * heights to decide placement.
  */
-export function BookMasonryGrid({ items }: { items: RecommendationBookItem[] }) {
+interface BookMasonryGridProps {
+  items: BookCardData[]
+  /** Forwarded to every card — shelf-discover context (spec §12.8:
+   * "defaults Save to current shelf"). */
+  defaultShelfId?: string
+}
+
+export function BookMasonryGrid({ items, defaultShelfId }: BookMasonryGridProps) {
   const columnCount = useColumnCount()
   const columns = useMemo(() => distributeIntoColumns(items, columnCount), [items, columnCount])
 
@@ -32,7 +38,7 @@ export function BookMasonryGrid({ items }: { items: RecommendationBookItem[] }) 
       {columns.map((column, columnIndex) => (
         <div key={columnIndex} className="flex flex-1 flex-col gap-4">
           {column.map((book) => (
-            <BookCard key={book.book_id} book={book} />
+            <BookCard key={book.book_id} book={book} defaultShelfId={defaultShelfId} />
           ))}
         </div>
       ))}

@@ -211,6 +211,25 @@ def get_shelf_ids_for_book(session: Session, *, user_id: UUID, book_id: int) -> 
     return list(session.execute(stmt).scalars().all())
 
 
+def get_shelf_ids_for_books(
+    session: Session, *, user_id: UUID, book_ids: Sequence[int]
+) -> dict[int, list[UUID]]:
+    """Batched form of :func:`get_shelf_ids_for_book` — search results
+    (spec §9.6) need every result's shelf membership at once, not one query
+    per row."""
+    if not book_ids:
+        return {}
+    stmt = (
+        select(ShelfBook.book_id, ShelfBook.shelf_id)
+        .join(Shelf, Shelf.id == ShelfBook.shelf_id)
+        .where(Shelf.user_id == user_id, ShelfBook.book_id.in_(book_ids))
+    )
+    result: dict[int, list[UUID]] = {}
+    for book_id, shelf_id in session.execute(stmt).all():
+        result.setdefault(book_id, []).append(shelf_id)
+    return result
+
+
 def get_owned_shelf_ids(session: Session, *, user_id: UUID, shelf_ids: Sequence[UUID]) -> set[UUID]:
     """Subset of shelf_ids that both exist and belong to user_id."""
     if not shelf_ids:

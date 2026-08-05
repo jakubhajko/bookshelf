@@ -666,10 +666,114 @@ Phases mirror spec §18 exactly. Status is updated as work lands.
   similar-books section (single page, risk #54); an automated accessibility
   audit (Phase 9).
 
-### Phase 8 — Shelves/Rated/Search — not started
+### Phase 8 — Shelves/Rated/Search — **done, this pass**
 
-Shelf overview collages, Books/Discover tabs, Rated page (sort/filter), search
-page with URL state, all loading/empty/error states.
+- **`modules/search` (new — backend, spec §9.6)**: `GET /search/books?q=...`.
+  `repository.py`'s `_rank_tier` collapses spec §9.6's seven tiers into one
+  SQL `CASE` (exact title → exact title/author combination → title prefix →
+  trigram fuzzy title → trigram fuzzy author → full-text description →
+  popularity tiebreak), evaluated in order so an exact-title match is never
+  double-counted as merely fuzzy. Tiers 4-5 use pg_trgm's `%` operator
+  (`Column.op('%')`, not a bare `similarity()` call — verified only the
+  operator form is planner-recognized against the `gin_trgm_ops` indexes
+  from migration `43bc30e307a2`); tier 6 matches the full-text GIN index's
+  own `to_tsvector('english', ...)` expression exactly; tier 7 uses the
+  dataset's own `ratings_count`, not `packages/recommender`'s Bayesian
+  -shrunk popularity artifact (a different concept for a different
+  purpose — see ADR-0012). Every query fragment was executed against the
+  real 92,524-book dataset before being written into the module, not
+  assumed — e.g. confirmed a "harry potter" query correctly ranks
+  title-prefix matches ahead of a merely-fuzzy biography title. Pagination
+  is a 3-key keyset cursor (`tier`, `popularity`, `book_id`), verified by
+  executing an actual page-boundary query and confirming a clean resume.
+  Unlike `RecommendationBookItem`, `SearchResultItem` carries a full
+  `user_state` per result (spec §9.6: "search keeps prior user states
+  visible") — batch-fetched via two new repository functions
+  (`interactions_repository.get_states_for_books`,
+  `shelves_repository.get_shelf_ids_for_books`), not one query per row.
+  See ADR-0012 for the full design and alternatives considered.
+- **Tests**: 2 unit (`cursor_value_for_row`) + 10 integration — each tier
+  independently, popularity tiebreak within a tier, inactive books
+  excluded, no-match returns empty, and the two tests that matter most:
+  rated/Not-Interested/shelved books all stay visible with *accurate*
+  per-result state (not just "not excluded"), and cursor pagination across
+  a real multi-page scenario has no duplicates or gaps. 230 backend tests
+  total (was 218 after Phase 7), 95% coverage (up from 94%).
+- **Frontend — shared groundwork**: `BookCard`'s prop type generalized from
+  the concrete `RecommendationBookItem` to a minimal structural
+  `BookCardData` interface, so `SearchResultItem`/`RatedBookItem` pass
+  directly into the same card/grid components Home already used — no
+  adapter layer. Added always-visible (not hover-gated, unlike the
+  shelf-selector/Save overlay) rating/Not-Interested badges to `BookCard`
+  — dead code on Home (spec §5.5 guarantees Neutral there) but real on
+  every surface this phase adds. Two new `useBookState` seeding hooks
+  (`useSeedBookStatesFromSearchResults` — full authoritative replace;
+  `useSeedRatingsIntoBookState` — partial merge, since `RatedBookItem` has
+  no `shelf_ids`) populate the shared per-book cache from a page of
+  results, using `useLayoutEffect` rather than `useEffect` so an
+  already-rated result never flashes as unrated for one frame first.
+  `hooks/useInfiniteScrollSentinel.ts` extracted once Home, Shelf-books,
+  Shelf-discover, and Search all needed the identical
+  `IntersectionObserver` wiring (Home refactored to use it too).
+- **Shelves overview** (`routes/Shelves.tsx`): board-like cover collages
+  (2x2 grid of each shelf's most-recent covers, spec §12.8) + inline
+  create form. Rename/edit-description/delete deliberately live on the
+  shelf *detail* page, not this grid (risk #58).
+- **Shelf detail** (`routes/ShelfDetailLayout.tsx` + `ShelfBooks.tsx` +
+  `ShelfDiscover.tsx`): one layout route (`/shelves/:shelfId`) wrapping
+  Books/Discover as nested child routes so the header (name/description,
+  rename via an inline form, delete via a Radix `AlertDialog` confirming
+  spec §5.4's "ratings/other shelves unaffected" guarantee) and tab nav
+  render once, not duplicated per tab. Books tab: `GET
+  /shelves/{id}/books`, infinite-scrolled. Discover tab: `GET
+  /recommendations/shelves/{id}` (built and tested since Phase 5, rendered
+  for the first time here) — cards here default their quick-Save to *this*
+  shelf rather than the session's last-used one (spec §12.8: "defaults
+  Save to current shelf"), via a new `defaultShelfId` prop threaded through
+  `BookMasonryGrid` → `BookCard` (risk #59).
+- **Rated** (`routes/Rated.tsx`): all 5 sorts (backend complete since
+  Phase 4) as toggle buttons, rating-range as two `<select>`s, genre as a
+  plain text filter (no "list genres" endpoint exists to populate a
+  dropdown from, risk #61) — every control re-fetches immediately on
+  change, no separate "Apply" step.
+- **Search** (`shell/SearchBar.tsx` + `routes/Search.tsx`): the search bar
+  moved out of `TopBar.tsx` into its own component with a debounced (300ms)
+  suggestions dropdown — built on Radix `Popover.Anchor` (not `Trigger`:
+  the popover is driven by focus/typing on the input, not a click-toggle)
+  with `onOpenAutoFocus` suppressed so opening it never steals focus from
+  the input. Suggestions call the *same* `GET /search/books` with a small
+  `limit` (spec §9.6 lists exactly one search route, no separate
+  suggestions endpoint) and navigate straight to the book; recent searches
+  (`localStorage`, 5 max, deduplicated) show when the input is empty and
+  focused. Individual suggestion/recent-search rows are plain tabbable
+  buttons inside a `Popover`, not a full ARIA 1.2 combobox with
+  `aria-activedescendant`/arrow-key roving — keyboard-operable via Tab, a
+  deliberate scope trim in the same spirit as Phase 7's shelf-selector
+  (risk #62). The results page (`routes/Search.tsx`) reads `?q=` from the
+  URL (spec §12.10: "query in URL"), infinite-scrolls, and seeds each
+  result's state so badges are accurate immediately.
+- **Tests**: 21 new frontend tests across 5 new files — shelf tabs
+  (Books/Discover render distinct content, spec §13.4's explicitly named
+  gap from Phase 7), shelf rename/delete, shelf CRUD on the overview
+  (create/empty/error), search suggestions (debounced fetch, click
+  -through to a book, recent searches, submit-and-record), search results
+  (empty/error/badge-accuracy), rated sort/filter re-fetching. 58 frontend
+  tests total (was 37 after Phase 7).
+- **Live smoke-tested** against the real dev database: search for "Dune"
+  (exact match ranks first ahead of a far-more-popular sequel — tier order
+  dominates the popularity tiebreak, as designed) and "Frank Herbert"
+  (title-tier matches like a biography outrank the pure author-tier match
+  on "Dune" itself — also as designed, confirming tier separation is
+  working correctly, not a bug); full shelf lifecycle (create → rename →
+  add a book → list its books → shelf-scoped discover recommendations →
+  delete); rate a book and confirm it appears correctly sorted in
+  `/me/ratings`. Clean server logs throughout.
+- **Not built**: an automated accessibility audit (Phase 9); a "list all
+  genres" endpoint for the Rated page's genre filter to become a dropdown
+  instead of free text; cross-request duplicate suppression for Search
+  (same `exclude`-not-wired scope trim as Home, Phase 7 risk #55 — search
+  has no analogous mechanism at all, since ADR-0012 deliberately skips
+  ADR-0007's persisted-batch design for search).
 
 ### Phase 9 — Hardening — not started
 
@@ -690,16 +794,16 @@ on the basis of intent, only of a passing command.
 - [x] Parquet catalog import (`make import-data`; full 92,526-row catalog imported and verified — see Phase 2)
 - [x] Local covers (`LocalFileStorage` + safe path resolution, spec §7.3, now actually serving requests via `GET /api/v1/covers/{object_key}`, spec §20/ADR-0011 — **correcting this plan's own Phase 4/6-era note**, which read spec §9's silence on a cover route as meaning none was needed; Phase 7 needed to actually render an image for the first time and found spec §20's "do not construct cover paths in frontend" requires exactly this route to exist)
 - [x] Home feed through provider (`GET /recommendations/home`, spec §9.5 — mock and popularity providers both live-tested; now rendered end to end, masonry grid + infinite scroll + skeleton/retry/empty states, spec §12.4)
-- [ ] Title/author search (backend not built — not in Phase 5's own spec §18 bullet list either; the frontend search bar exists and navigates to `/search?q=...`, but that route itself is still a Phase 8 `ComingSoon` placeholder)
+- [x] Title/author search (`GET /search/books`, spec §9.6's seven-tier ranking, ADR-0012 — rendered end to end: debounced suggestions in the top bar, full masonry results at `/search?q=...` with state badges)
 - [x] Book detail (`GET /books/{id}` — spec §12.7's fields (minus a dedicated "series" display, see risk #48) now rendered end to end, including the similar-books grid, `GET /recommendations/books/{id}/similar`, as a route-backed modal on desktop and a full page on direct navigation)
 - [x] Half-star ratings (`PUT/DELETE /books/{id}/rating`, spec §9.2 half-step conversion; `RatingStars` now renders and calls it with optimistic update + rollback, spec §12.7/§12.11)
 - [x] Mutual exclusivity with Not Interested (service logic + DB `CheckConstraint`, spec §5.2)
 - [x] State removal (`DELETE` rating/not-interested, idempotent, spec §5.3)
-- [x] Full shelf management (create/rename/describe/delete, spec §5.4/§9.3)
+- [x] Full shelf management (create/rename/describe/delete, spec §5.4/§9.3 — rendered end to end: create + collage overview, rename/edit-description/delete on the shelf detail header)
 - [x] Multi-shelf books (a book may belong to zero/one/many shelves; `PUT /books/{id}/shelves` atomic sync)
 - [x] Not Interested may remain shelved (explicit integration test — spec §5.3/§12.7)
 - [x] Shelf feed allows books from other shelves (`GET /recommendations/shelves/{id}`, spec §5.5 — `shelf_exclusions` only excludes *this* shelf's books, not every shelf; integration-tested)
-- [x] Rated page (backend: `GET /me/ratings` — all 5 sorts, rating-range/genre filters, cursor pagination, fully tested; no rendered page yet — Phase 8)
+- [x] Rated page (`GET /me/ratings` — all 5 sorts, rating-range/genre filters, cursor pagination — now rendered end to end with sort toggles and range/genre filter controls)
 - [x] Similar books (`GET /recommendations/books/{id}/similar`, spec §5.5 — excludes source/rated/Not-Interested, saved books remain eligible; rendered on the detail page via the same `BookMasonryGrid` Home uses, single page rather than infinite-scrolled, risk #54)
 - [x] Cursor pages without duplicates (recommendation batches: `PK(request_id, position)` plus a defensive disjoint-pages integration test per surface, spec §9.9/ADR-0007)
 - [x] Fallback provider (spec §10.10's chain, contract-tested in `packages/recommender` and integration-tested at the apps/api boundary via a dependency-override 503 test)
@@ -1061,6 +1165,70 @@ just green test suites. Server logs stayed clean (structured JSON, no
 stack traces) throughout. As in Phase 6, no interactive browser tool is
 available in this environment (risk #44) — both dev servers were left
 running afterward for manual verification.
+
+## 5g. Phase 8 validation commands and results
+
+```bash
+# Backend: new search module
+cd apps/api
+uv run ruff format --check . && uv run ruff check . && uv run mypy .
+uv run pytest tests/test_search.py -v                                     # 2 passed
+uv run pytest ../../tests/integration/test_search.py -v                    # 10 passed
+uv run pytest tests ../../tests/integration --cov=book_app --cov-report=term-missing -q   # 230 passed, 95%
+cd ../../packages/recommender && uv run ruff format --check . && uv run ruff check . && uv run mypy . && uv run pytest -q   # 38 passed, unaffected
+
+# tests/integration/ lint via the exact repo-root invocation `make lint` uses
+cd ../..
+uv run --project apps/api ruff format tests && uv run --project apps/api ruff check tests
+
+# Frontend: shelves/rated/search pages, generalized BookCard, new module
+cd apps/web
+npx tsc -b --force
+npm run lint
+npm run test        # 58 passed (17 files, was 37/12 after Phase 7)
+npm run build
+
+# Regenerate the API client against the updated backend schema (new /search path)
+cd ../api && uv run python -m book_app.cli.export_openapi
+cd ../web && npm run generate-api-client
+
+# Live smoke test — real dev database, exact `make dev-api` launch convention
+cd ../api && uv run uvicorn book_app.main:app --port 8000 &
+cd ../web && npm run dev &
+
+curl -sc /tmp/c8 -X POST http://localhost:8000/api/v1/auth/register -H "Content-Type: application/json" \
+  -d '{"username":"phase8smoke","password":"correct horse battery staple","password_confirmation":"correct horse battery staple"}'
+curl -sc /tmp/c8 -b /tmp/c8 -X POST http://localhost:8000/api/v1/auth/login -H "Content-Type: application/json" \
+  -d '{"username":"phase8smoke","password":"correct horse battery staple"}'
+CSRF=$(grep csrf_token /tmp/c8 | awk '{print $NF}')
+
+curl -s -b /tmp/c8 "http://localhost:8000/api/v1/search/books?q=Dune&limit=3"              # exact match ranks first
+curl -s -b /tmp/c8 "http://localhost:8000/api/v1/search/books?q=Frank%20Herbert&limit=3"    # title-tier outranks author-tier
+
+SHELF_ID=$(curl -s -b /tmp/c8 -X POST http://localhost:8000/api/v1/shelves -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $CSRF" -d '{"name":"Phase 8 Smoke Shelf"}' | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+curl -s -b /tmp/c8 -X PATCH "http://localhost:8000/api/v1/shelves/$SHELF_ID" -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $CSRF" -d '{"name":"Renamed Shelf"}'
+curl -s -b /tmp/c8 -X PUT "http://localhost:8000/api/v1/shelves/$SHELF_ID/books/58203" -H "X-CSRF-Token: $CSRF"
+curl -s -b /tmp/c8 "http://localhost:8000/api/v1/shelves/$SHELF_ID/books"
+curl -s -b /tmp/c8 "http://localhost:8000/api/v1/recommendations/shelves/$SHELF_ID?limit=2"
+curl -s -b /tmp/c8 -X PUT http://localhost:8000/api/v1/books/1/rating -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $CSRF" -d '{"rating": 5.0}'
+curl -s -b /tmp/c8 "http://localhost:8000/api/v1/me/ratings?sort=highest&limit=3"
+curl -s -b /tmp/c8 -X DELETE "http://localhost:8000/api/v1/shelves/$SHELF_ID" -H "X-CSRF-Token: $CSRF"
+```
+
+Result: all green. Frontend: 58/58 tests, lint clean, typecheck clean,
+production build succeeds (~423 KB JS / 22 KB CSS pre-gzip). Backend:
+230/230 tests (95% coverage, up from 218/94% — the 12 new search tests),
+recommender unaffected at 38/38. Live smoke test confirmed the full search
+-ranking behavior against real data (exact-title-beats-popular-sequel,
+title-tier-beats-author-tier — both exactly as ADR-0012 designed, not
+just "returns something") and the complete shelf lifecycle
+(create→rename→add-book→list→discover→delete) plus rating sort. Server
+logs stayed clean throughout. As in Phases 6-7, no interactive browser
+tool is available in this environment (risk #44) — both dev servers were
+left running afterward for manual verification.
 
 ## 6. Risks and assumptions
 
@@ -1589,20 +1757,85 @@ conservative, reversible default and document it."
     Shelves and back via the rail) — opening a book as a modal never
     unmounts Home at all, so that path already preserves scroll position
     for free.
+58. **Rename/edit-description/delete live on the shelf detail page, not
+    the shelf overview grid** (spec §12.8 lists both "Create, rename, edit
+    description, and delete" and separately "Overview uses board-like
+    cover collages" without saying which surface owns which action).
+    Resolved as: the overview is for browsing/navigating between shelves,
+    the detail page is where a visitor is already focused on *one* shelf —
+    the more standard split, and it keeps the collage grid uncluttered.
+    Reversible if per-card quick-actions turn out to matter more than this
+    phase judged.
+59. **Shelf Discover's cards default their quick-Save to the shelf being
+    discovered for, overriding the session's last-used shelf** (spec
+    §12.8: "defaults Save to current shelf") — implemented as a new
+    `defaultShelfId` prop threaded `BookMasonryGrid` → `BookCard`, checked
+    ahead of `useLastUsedShelf`'s value in the quick-Save handler.
+    Deliberately *also* updates the session's last-used shelf when used,
+    since it genuinely was the most recently saved-to shelf — consistent
+    with Phase 7's own "remember last-used shelf during session" reading,
+    not a special case carved out from it.
+60. **Search tier 2 ("exact title/author combination", spec §9.6) is read
+    as the query exactly matching "title author" or "author title"
+    concatenated, case-insensitively** — covering both natural typing
+    orders (e.g. "dune frank herbert" or "frank herbert dune"). Spec gives
+    no further detail; this is a conservative, documented, reversible
+    reading, not a guess left silent. See ADR-0012.
+61. **Search's popularity tiebreak (tier 7) uses the dataset's own
+    `ratings_count` column, not `packages/recommender`'s Bayesian-shrunk
+    popularity artifact** (`build-popularity`'s output). Deliberate, not
+    an oversight: reusing the recommender's artifact would mean a live
+    search request depends on whether `make build-popularity` has ever
+    been run, and reading a file one module owns from a route in a
+    different one inverts the module boundary ADR-0002 sets up.
+    `ratings_count` is always present from import, with zero coupling to
+    the recommendation pipeline. See ADR-0012 — flagged here too so a
+    future reader doesn't mistake this for a bug (two different
+    "popularity" numbers existing in the same app is a legitimate
+    surprise on a cold read).
+62. **The Rated page's genre filter is a plain text input, not a
+    dropdown** — no endpoint lists the catalog's genre taxonomy (Phase 2
+    imported 10 genres total, but nothing exposes them as an API
+    resource), and building one wasn't asked for by any phase's own spec
+    §18 scope. The backend already does exact match after the same
+    `normalize_for_uniqueness` folding used everywhere else, so a
+    correctly-typed genre name works identically to a dropdown selection
+    would — the gap is discoverability, not correctness.
+63. **`useSeedRatingsIntoBookState` only patches `rating` (merge, not
+    replace) — `shelf_ids` can be stale on the Rated page specifically**
+    until the visitor opens a book's detail or interacts with its shelf
+    selector directly. `RatedBookItem` (spec §9.4) has no `shelf_ids`
+    field to seed from (a plain ratings listing doesn't join shelves), so
+    a book that's both rated *and* shelved would show "Save" (not
+    "Saved") on its Rated-page card until corrected. Same class of
+    limitation Home already has by design (spec §5.5 guarantees Home
+    never needs shelf state up front) — genuinely worse here since a
+    rated-and-shelved book is a realistic, not edge-case, combination.
+    Not fixed this phase: would mean extending `RatedBookItem` (an
+    already-shipped, tested Phase 4 schema) for a Phase 8 frontend
+    nicety spec's own Rated section doesn't ask for ("Grid of rated books
+    with user rating" — no mention of shelf controls at all).
+64. **Search's suggestion dropdown is a Radix `Popover` around plain
+    tabbable buttons, not a full ARIA 1.2 combobox** (`aria-activedescendant`,
+    arrow-key roving focus through the list). Keyboard-operable — Tab
+    reaches every suggestion, Enter/Space activates it, Escape closes the
+    popover — just without the "arrow keys move a virtual selection"
+    affordance real combobox widgets have. Same trade-off, same
+    reasoning, as Phase 7's shelf-selector (native checkboxes over a
+    hand-rolled listbox): a simpler, natively-correct pattern over a
+    harder-to-get-right one, for a widget spec §12.10 itself scopes down
+    ("no technical mode control in version one").
 
 ## 7. Next phase
 
-**Phase 8 — Shelves/Rated/Search.** Shelf overview with board-like cover
-collages (name, count, updated order); create/rename/edit-description/
-delete; shelf detail's Books/Discover tabs (Discover reusing this phase's
-`BookMasonryGrid`/`BookCard` against `GET /recommendations/shelves/{id}`,
-already built and tested since Phase 5); the Rated page (backend already
-complete since Phase 4 — all 5 sorts, rating-range/genre filters, cursor
-pagination) with its sort/filter controls; Search (`GET /search/books` is
-**not built yet** — not in any phase's own spec §18 bullet list before this
-one either, so this is also the first phase that needs new backend work)
-with debounced suggestions, URL-encoded query state, and state badges on
-results (ratable/saved/Not-Interested — the first surface where a book can
-legitimately arrive already in one of those states, unlike Home). All
-loading/empty/error states throughout. Do not start without explicit
-instruction.
+**Phase 9 — Hardening.** Playwright E2E for the full critical flow (spec
+§13.5); an accessibility pass (the first *automated* audit — every prior
+phase built on accessible primitives, spec §12.12, but nothing has run
+axe or equivalent yet); security headers + general request rate limiting
+(spec §14 — auth-specific rate limiting has existed since Phase 3, this
+extends it); production Docker builds actually verified (Docker has not
+been installed in this environment through any prior phase, risk #1 —
+worth re-checking whether that's still true before assuming it needs a
+workaround again); demo seed data (`make seed-demo`); documentation pass;
+final acceptance run against spec §19 in full. Last phase per spec §18's
+own list — do not start without explicit instruction.

@@ -37,3 +37,13 @@ export async function getSimilarRecommendations(
   })
   return unwrap(result)
 }
+
+export async function getShelfRecommendations(
+  shelfId: string,
+  params: PageParams = {},
+): Promise<RecommendationPage> {
+  const result = await apiClient.GET('/api/v1/recommendations/shelves/{shelf_id}', {
+    params: { path: { shelf_id: shelfId }, query: toQuery(params) },
+  })
+  return unwrap(result)
+}

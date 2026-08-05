@@ -1,10 +1,11 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { queryKeys } from '../api/queryKeys'
 import * as recommendationsApi from '../api/recommendations'
 import * as shelvesApi from '../api/shelves'
 import { BookMasonryGrid, BookMasonrySkeleton } from '../components/BookMasonryGrid'
+import { useInfiniteScrollSentinel } from '../hooks/useInfiniteScrollSentinel'
 import { useScrollRestoration } from '../hooks/useScrollRestoration'
 
 const GUIDANCE_DISMISSED_KEY = 'bookshelf:home-guidance-dismissed'
@@ -81,7 +82,6 @@ function GuidanceBanner({ hasShelves }: { hasShelves: boolean }) {
  * sentinel triggers the next page, never a scroll-position calculation. */
 export function HomePage() {
   useScrollRestoration('home')
-  const sentinelRef = useRef<HTMLDivElement>(null)
   const { data: shelves = [] } = useQuery({
     queryKey: queryKeys.shelves.list,
     queryFn: shelvesApi.listShelves,
@@ -96,20 +96,10 @@ export function HomePage() {
       getNextPageParam: (lastPage) => lastPage.next_cursor,
     })
 
-  useEffect(() => {
-    const sentinel = sentinelRef.current
-    if (!sentinel) return
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting && hasNextPage && !isFetchingNextPage) {
-          void fetchNextPage()
-        }
-      },
-      { rootMargin: '400px' },
-    )
-    observer.observe(sentinel)
-    return () => observer.disconnect()
-  }, [fetchNextPage, hasNextPage, isFetchingNextPage])
+  const sentinelRef = useInfiniteScrollSentinel(
+    () => void fetchNextPage(),
+    !hasNextPage || isFetchingNextPage,
+  )
 
   const items = data?.pages.flatMap((page) => page.items) ?? []
 

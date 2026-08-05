@@ -1,8 +1,10 @@
 import { type QueryClient, skipToken, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect } from 'react'
+import { useEffect, useLayoutEffect } from 'react'
 import * as booksApi from '../api/books'
 import type { BookUserState } from '../api/books'
 import { queryKeys } from '../api/queryKeys'
+import type { RatedBookItem } from '../api/ratings'
+import type { SearchResultItem } from '../api/search'
 
 const NEUTRAL_STATE: BookUserState = { rating: null, not_interested: false, shelf_ids: [] }
 
@@ -134,4 +136,38 @@ export function useSyncShelvesMutation(bookId: number) {
     onError: (_error, _vars, context) => rollback(queryClient, bookId, context),
     onSuccess: (shelfIds) => mergeBookState(queryClient, bookId, { shelf_ids: shelfIds }),
   })
+}
+
+/**
+ * Search results carry each book's *authoritative* `user_state` (spec
+ * §9.6: "search keeps prior user states visible") — seed it into the
+ * shared cache so `BookCard`'s badges/shelf-selector are correct
+ * immediately, not just after a detail-page visit corrects them.
+ * `useLayoutEffect`, not `useEffect`: this must run before paint, or an
+ * already-rated result would flash as unrated for one frame first.
+ */
+export function useSeedBookStatesFromSearchResults(items: readonly SearchResultItem[]) {
+  const queryClient = useQueryClient()
+  useLayoutEffect(() => {
+    for (const item of items) {
+      seedBookState(queryClient, item.book_id, item.user_state)
+    }
+  }, [items, queryClient])
+}
+
+/**
+ * Rated-books results only carry the rating itself — spec §9.4's
+ * `RatedBookItem` has no `shelf_ids` (a batched lookup a plain ratings
+ * listing doesn't need) — merges rather than replaces so it never
+ * clobbers a `shelf_ids` some other surface already seeded correctly.
+ * `not_interested: false` is always safe to assert: a rated book is never
+ * Not Interested by construction (spec §5.2's mutual exclusion).
+ */
+export function useSeedRatingsIntoBookState(items: readonly RatedBookItem[]) {
+  const queryClient = useQueryClient()
+  useLayoutEffect(() => {
+    for (const item of items) {
+      mergeBookState(queryClient, item.book_id, { rating: item.rating, not_interested: false })
+    }
+  }, [items, queryClient])
 }

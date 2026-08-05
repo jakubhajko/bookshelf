@@ -14,6 +14,7 @@ import { RatedPage } from './routes/Rated'
 import { RegisterPage } from './routes/Register'
 import { SearchPage } from './routes/Search'
 import { ShelfBooksPage } from './routes/ShelfBooks'
+import { ShelfDetailLayout } from './routes/ShelfDetailLayout'
 import { ShelfDiscoverPage } from './routes/ShelfDiscover'
 import { ShelvesPage } from './routes/Shelves'
 import { AppShell } from './shell/AppShell'
@@ -51,8 +52,10 @@ export function AppRoutes() {
             <Route path="/search" element={<SearchPage />} />
             <Route path="/books/:bookId" element={<BookDetailPage />} />
             <Route path="/shelves" element={<ShelvesPage />} />
-            <Route path="/shelves/:shelfId/books" element={<ShelfBooksPage />} />
-            <Route path="/shelves/:shelfId/discover" element={<ShelfDiscoverPage />} />
+            <Route path="/shelves/:shelfId" element={<ShelfDetailLayout />}>
+              <Route path="books" element={<ShelfBooksPage />} />
+              <Route path="discover" element={<ShelfDiscoverPage />} />
+            </Route>
             <Route path="/rated" element={<RatedPage />} />
             <Route path="/account" element={<AccountPage />} />
           </Route>

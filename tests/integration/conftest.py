@@ -130,13 +130,17 @@ def _insert_book(
     primary_author_name: str | None = "Test Author",
     catalog_status: str = "ACTIVE",
     cover_object_key: str | None = None,
+    ratings_count: int | None = None,
+    description: str | None = None,
 ) -> int:
     with engine.begin() as conn:
         book_id: int = conn.execute(
             text(
                 "INSERT INTO books "
-                "(work_id, title, primary_author_name, catalog_status, cover_object_key) "
-                "VALUES (:work_id, :title, :author, :status, :cover_object_key) RETURNING id"
+                "(work_id, title, primary_author_name, catalog_status, cover_object_key, "
+                "ratings_count, description) "
+                "VALUES (:work_id, :title, :author, :status, :cover_object_key, "
+                ":ratings_count, :description) RETURNING id"
             ),
             {
                 "work_id": work_id or f"test-work-{uuid4()}",
@@ -144,6 +148,8 @@ def _insert_book(
                 "author": primary_author_name,
                 "status": catalog_status,
                 "cover_object_key": cover_object_key,
+                "ratings_count": ratings_count,
+                "description": description,
             },
         ).scalar_one()
     return book_id

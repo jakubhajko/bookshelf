@@ -4,6 +4,7 @@ caller's service owns the transaction.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -20,6 +21,20 @@ from book_app.shared.text import normalize_for_uniqueness
 
 def get_state(session: Session, *, user_id: UUID, book_id: int) -> UserBookState | None:
     return session.get(UserBookState, (user_id, book_id))
+
+
+def get_states_for_books(
+    session: Session, *, user_id: UUID, book_ids: Sequence[int]
+) -> dict[int, UserBookState]:
+    """Batched form of :func:`get_state` — search results (spec §9.6:
+    "keeps prior user states visible") need every result's rating/
+    Not-Interested state at once, not one query per row."""
+    if not book_ids:
+        return {}
+    stmt = select(UserBookState).where(
+        UserBookState.user_id == user_id, UserBookState.book_id.in_(book_ids)
+    )
+    return {state.book_id: state for state in session.execute(stmt).scalars()}
 
 
 def get_or_create_state(session: Session, *, user_id: UUID, book_id: int) -> UserBookState:
