@@ -179,3 +179,70 @@ def cursor_value_for_row(sort: RatingsSort, row: RatedBookRow) -> Any:
     if sort is RatingsSort.TITLE:
         return row.title
     return row.primary_author_name or "~"
+
+
+# --- Read-side queries (Phase 5: recommendation context/eligibility) --------
+
+# Conservative bounds on what goes into a UserContext snapshot (spec §10.5:
+# "bounded recent interactions" — extended here to ratings too, since a
+# long-time user's full rating history has no upper bound otherwise and
+# nothing consumes more than this yet; raise later if a real engine needs
+# more signal).
+MAX_CONTEXT_RATINGS = 500
+MAX_CONTEXT_RECENT_INTERACTIONS = 50
+
+
+def get_rated_book_ids(session: Session, *, user_id: UUID) -> set[int]:
+    stmt = select(UserBookState.book_id).where(
+        UserBookState.user_id == user_id, UserBookState.rating_value.isnot(None)
+    )
+    return set(session.execute(stmt).scalars())
+
+
+def get_not_interested_book_ids(session: Session, *, user_id: UUID) -> set[int]:
+    stmt = select(UserBookState.book_id).where(
+        UserBookState.user_id == user_id, UserBookState.not_interested.is_(True)
+    )
+    return set(session.execute(stmt).scalars())
+
+
+@dataclass(frozen=True)
+class RatingContextRow:
+    book_id: int
+    rating_value: int
+    updated_at: datetime
+
+
+def get_rating_context_rows(session: Session, *, user_id: UUID) -> list[RatingContextRow]:
+    stmt = (
+        select(UserBookState.book_id, UserBookState.rating_value, UserBookState.updated_at)
+        .where(UserBookState.user_id == user_id, UserBookState.rating_value.isnot(None))
+        .order_by(UserBookState.updated_at.desc())
+        .limit(MAX_CONTEXT_RATINGS)
+    )
+    return [
+        RatingContextRow(
+            book_id=row.book_id, rating_value=row.rating_value, updated_at=row.updated_at
+        )
+        for row in session.execute(stmt)
+    ]
+
+
+@dataclass(frozen=True)
+class RecentEventRow:
+    event_type: str
+    book_id: int | None
+    occurred_at: datetime
+
+
+def get_recent_events(session: Session, *, user_id: UUID) -> list[RecentEventRow]:
+    stmt = (
+        select(InteractionEvent.event_type, InteractionEvent.book_id, InteractionEvent.occurred_at)
+        .where(InteractionEvent.user_id == user_id)
+        .order_by(InteractionEvent.occurred_at.desc())
+        .limit(MAX_CONTEXT_RECENT_INTERACTIONS)
+    )
+    return [
+        RecentEventRow(event_type=row.event_type, book_id=row.book_id, occurred_at=row.occurred_at)
+        for row in session.execute(stmt)
+    ]

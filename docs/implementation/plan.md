@@ -335,13 +335,112 @@ Phases mirror spec §18 exactly. Status is updated as work lands.
   explicitly later phases; the frontend never renders any of this yet
   (Phase 6+).
 
-### Phase 5 — Recommendation boundary — not started
+### Phase 5 — Recommendation boundary — **done, this pass**
 
-`packages/recommender` gets its real shape: `contracts/`, `providers/`,
-`artifacts/`, `exceptions.py`; mock + popularity engines; in-process +
-fallback providers; request/result/impression persistence; cursor pagination;
-the three recommendation endpoints; contract tests. Explicitly not the final
-funnel.
+- **`packages/recommender` (`book_recommender`)** gets its real shape.
+  `contracts/` — `UserContext`/`HomeContext`/`ShelfContext`/
+  `SimilarBooksContext`/`SearchContext` (discriminated union, spec §10.4),
+  `RecommendationEngineRequest`/`Result` (sync layer) and
+  `RecommendationRequest`/`Batch` (async layer, spec §10.6-§10.7) kept as
+  distinct named types per the spec's own naming even though identical in
+  content today — the seam a remote provider needs later. `engines/` (not
+  one of the spec's literal four directories — added as a natural sibling
+  to `providers/`, documented as a deliberate, additive deviation) —
+  `MockRecommendationEngine` (seeded-but-varied via `hashlib.sha256`, never
+  Python's randomized `hash()`; supports configurable failure/latency, spec
+  §10.11), `PopularityRecommendationEngine` (serves a precomputed ranking,
+  never re-sorts it), `FuturePipelineRecommendationEngine` (placeholder,
+  raises clearly — spec §2 forbids building the real funnel).
+  `providers/` — `InProcessProvider` (runs the sync engine via
+  `asyncio.to_thread`, spec §10.3), `FallbackProvider` (spec §10.10's
+  chain: primary → popularity fallback → `ProviderError`; skips the
+  redundant wrap when primary already *is* popularity), `RemoteProvider`
+  (skeleton, spec §10.3). `artifacts/` — `ArtifactManifest` (spec §10.13,
+  §7.5's book_id/work_id/model_item_index triple) + `LocalArtifactStorage`
+  (stdlib-only; deliberately does not import `book_app.shared.storage` —
+  that would invert the intended dependency direction). Zero FastAPI/ORM
+  imports, verified by the existing hygiene test.
+- **`modules/recommendations`**: `eligibility.py` — pure functions over an
+  already-built `UserContext` implementing spec §5.5 exactly (home excludes
+  rated/Not-Interested/shelved-anywhere; shelf excludes rated/Not-Interested/
+  this-shelf-only; similar excludes rated/Not-Interested/the source book).
+  `context_builder.py` assembles `UserContext` from `interactions`/`shelves`
+  repository reads. `service.py` implements spec §11's ten-step workflow
+  end to end for all three surfaces plus cursor-page continuation: build
+  context → end the read transaction *before* calling the provider → call
+  it → defensively validate every candidate against currently-active books
+  (`books_repository.get_catalog_cards`) → persist the request+full batch →
+  serve the first page → persist its impressions → encode
+  `{request_id, position}` as the next cursor (reusing `shared.pagination`'s
+  codec, spec §9.9/ADR-0007). A malformed cursor, one pointing at another
+  user's batch, and one pointing at an expired batch all raise the same
+  `RECOMMENDATION_CURSOR_INVALID` (spec §6.6's existence-hiding principle).
+  A fully-exhausted provider (`ProviderError`) maps to `RECOMMENDATION_UNAVAILABLE`
+  (503, spec §10.10). `wiring.py` selects the provider from
+  `settings.recommendation_provider` — **lazily, on first request**, not
+  eagerly in `create_app()` (`main.py`'s own docstring: tests must be able
+  to construct the app without a live database; the mock engine's
+  candidate pool needs one, spec §10.11 — see risk #34).
+- **`cli/build_popularity.py`** (`make build-popularity`): computes a
+  Bayesian-shrunk popularity score per active book — support (`ratings_count`
+  `+ bx_ratings + bx_explicit`, `bx_explicit` deliberately counted again as
+  an extra weight for explicit engagement, verified never to exceed
+  `bx_ratings` in the real data first) pulls the score toward the
+  catalog-wide mean when low, so two five-star ratings can't outrank
+  thousands averaging 4.5 (spec §10.12's "support adjustment"). Writes
+  `manifest.json` + `scores.json` via the shared `LocalArtifactStorage`,
+  retires any previously-ACTIVE `model_versions` row for `popularity`, and
+  activates the new one. Verified against the real dev database: 92,524
+  books ranked in under a second, sensible top results (classics with
+  large, consistently-high rating support).
+- **Migration** (`b61e97f578c1`): `model_versions` (new native enum
+  `model_version_status`: `READY`/`ACTIVE`/`RETIRED` — no explicit value
+  list in the spec unlike catalog/account status, a conservative minimal
+  set since nothing yet builds an activation UI beyond the CLI writing
+  ACTIVE directly), `recommendation_requests` (CASCADE on `shelf_id`/
+  `source_book_id` rather than `interaction_events`' SET-NULL-and-preserve
+  pattern — deliberately different governance: these rows are an ephemeral,
+  `expires_at`-bounded cache per ADR-0007, not permanent history),
+  `recommendation_results`, `recommendation_impressions`. Verified with the
+  same empty-db round trip as prior phases; `alembic check` reports only
+  the same pre-existing hand-written-index false positive.
+- **API**: `GET /recommendations/home`, `.../shelves/{shelf_id}`,
+  `.../books/{book_id}/similar` (spec §9.5) — GET-only, no CSRF dependency.
+  All three accept `limit`, `cursor`, and an optional `exclude` (comma
+  -separated book ids) mapped to `session_exclusions` — spec §5.5's "already
+  returned in the current feed session" is otherwise automatically satisfied
+  by the persisted-batch design itself (unique book_ids per batch, fixed
+  positions), so `exclude` only matters *across* separate top-level requests
+  within a session; a genuinely underspecified detail, resolved this way
+  and documented rather than guessed at silently (risk #33).
+- **Tests**: recommender package now has 38 tests (was 3 hygiene-only) —
+  shared engine-contract tests parametrized across mock/popularity (spec
+  §13.2: unique ids, exclusions, count, determinism, valid metadata/reasons,
+  empty pool/user, typed errors), engine-specific behavior, provider
+  fallback-chain behavior, artifact manifest round trip. apps/api gained 7
+  unit tests (eligibility pure functions, artifact-path anchoring — the
+  latter caught by writing a test that checks the hardcoded `parents[N]`
+  index actually resolves to the repo root, exactly the kind of off-by-one
+  a future file move could silently break) and 27 integration tests (all
+  three surfaces incl. cursor pagination, eligibility exclusion end to end,
+  cross-user cursor rejection, the 503 fallback-exhausted path via a
+  dependency-override test double, `build-popularity`'s CLI logic incl. the
+  support-adjustment formula against deliberately crafted rating
+  distributions, provider-selection wiring). 247 tests total across the
+  whole backend (109 apps/api unit + 100 integration + 38 recommender), 95%
+  combined coverage on `book_app`.
+- **Live smoke-tested** against the real dev database (92,524 real books,
+  a real `make build-popularity` artifact) under *both* `mock` and
+  `popularity` provider configurations: full home → cursor-continuation →
+  rate-then-re-fetch-excluded → similar → shelf flow, 401/404 authorization
+  paths, clean server logs throughout.
+- **Not built**: search (`GET /search/books`) — not in Phase 5's own spec
+  §18 bullet list (contracts/mock/popularity/fallback/persistence/cursors/
+  endpoints/tests only); the real recommendation funnel (explicitly out of
+  scope, spec §2/§20); an S3 artifact backend (deferred, matching the exact
+  precedent already set for cover storage in Phase 2); any admin UI/CLI to
+  activate a *non-latest* model version; the frontend never renders any of
+  this yet (Phase 6+).
 
 ### Phase 6 — Frontend shell/auth — not started
 
@@ -378,39 +477,39 @@ on the basis of intent, only of a passing command.
 - [x] Logout/login preserves shelves/history (all state keyed by durable `user_id` in Postgres — shelves/ratings/events now exist and are integration-tested independently of any one session; not re-verified as one single logout-then-log-back-in-then-check-shelves test, but the two halves — session durability from Phase 3, per-user state persistence from this phase — are each already proven separately)
 - [x] Parquet catalog import (`make import-data`; full 92,526-row catalog imported and verified — see Phase 2)
 - [x] Local covers (`LocalFileStorage` + safe path resolution, spec §7.3 — storage-layer concern only; spec §9 lists no cover-serving HTTP route, so there's nothing further for the API to add here. Correcting this plan's own Phase 2/3-era note, which incorrectly expected one in Phase 4)
-- [ ] Home feed through provider (Phase 5)
-- [ ] Title/author search (not built)
-- [x] Book detail (`GET /books/{id}` — spec §12.7's fields minus the similar-books grid, which is Phase 5)
+- [x] Home feed through provider (`GET /recommendations/home`, spec §9.5 — mock and popularity providers both live-tested)
+- [ ] Title/author search (not built — not in Phase 5's own spec §18 bullet list either)
+- [x] Book detail (`GET /books/{id}` — spec §12.7's fields minus the similar-books grid, which is this phase's `GET /recommendations/books/{id}/similar`, now also live)
 - [x] Half-star ratings (`PUT/DELETE /books/{id}/rating`, spec §9.2 half-step conversion)
 - [x] Mutual exclusivity with Not Interested (service logic + DB `CheckConstraint`, spec §5.2)
 - [x] State removal (`DELETE` rating/not-interested, idempotent, spec §5.3)
 - [x] Full shelf management (create/rename/describe/delete, spec §5.4/§9.3)
 - [x] Multi-shelf books (a book may belong to zero/one/many shelves; `PUT /books/{id}/shelves` atomic sync)
 - [x] Not Interested may remain shelved (explicit integration test — spec §5.3/§12.7)
-- [ ] Shelf feed allows books from other shelves (shelf *discovery* eligibility — spec §5.5 — is a recommendation concept, Phase 5)
+- [x] Shelf feed allows books from other shelves (`GET /recommendations/shelves/{id}`, spec §5.5 — `shelf_exclusions` only excludes *this* shelf's books, not every shelf; integration-tested)
 - [x] Rated page (backend: `GET /me/ratings` — all 5 sorts, rating-range/genre filters, cursor pagination, fully tested; no rendered page yet — Phase 8)
-- [ ] Similar books (Phase 5)
-- [ ] Cursor pages without duplicates (this phase's own cursors — `/me/ratings`, `/shelves/{id}/books` — are keyset-paginated and tested across page boundaries; the acceptance-criteria wording tracks spec §9.9's recommendation-batch cursors specifically, which are Phase 5)
-- [ ] Fallback provider (Phase 5)
+- [x] Similar books (`GET /recommendations/books/{id}/similar`, spec §5.5 — excludes source/rated/Not-Interested, saved books remain eligible)
+- [x] Cursor pages without duplicates (recommendation batches: `PK(request_id, position)` plus a defensive disjoint-pages integration test per surface, spec §9.9/ADR-0007)
+- [x] Fallback provider (spec §10.10's chain, contract-tested in `packages/recommender` and integration-tested at the apps/api boundary via a dependency-override 503 test)
 
 ### Architecture
 
-- [x] Modular monolith skeleton (`apps/api/src/book_app/{core,shared,modules,cli}` — `modules/{books,users,auth,shelves,interactions}` now all have real content; `modules/{search,recommendations}` are the only ones still empty, starting Phase 5)
+- [x] Modular monolith skeleton (`apps/api/src/book_app/{core,shared,modules,cli}` — `modules/{books,users,auth,shelves,interactions,recommendations}` all have real content now; only `modules/search` remains empty)
 - [x] No frontend DB access (frontend has no DB driver/credentials; talks HTTP only)
-- [x] No recommender logic in routes (`modules/books/api.py` delegates every write to `interactions.service`/`shelves.service`; no ranking/scoring logic exists anywhere yet to leak into a route in the first place)
-- [x] Recommender package independent of FastAPI/ORM (zero such dependencies declared in `packages/recommender/pyproject.toml`; verified by a repo-hygiene test)
-- [x] Service-owned transactions (`interactions.service`/`shelves.service` each call `session.commit()` themselves at the end of every use case; `repository.py` files never commit, matching spec §4.2 — now exercised by three services, not just auth's)
-- [x] Append-only events (`InteractionEvent`, spec §8.9 — every rating/Not-Interested/shelf-membership transition appends one, nothing ever updates or deletes a row; verified by inspecting `interaction_events` directly in integration tests)
-- [x] Environment config (typed `Settings` covering every §11 category)
-- [x] Storage abstractions (`ObjectStorage` protocol + `LocalFileStorage`, spec §7.3; S3 implementation deferred, see §6)
-- [x] Explicit ID mappings (`work_id -> books.id`, `source_book_id -> books.id` both maintained during import; `book_id`/`work_id`/`model_item_index` triple for model artifacts is Phase 5, N/A yet)
+- [x] No recommender logic in routes (`modules/recommendations/service.py` orchestrates eligibility + the typed provider boundary; every ranking/scoring decision lives in `packages/recommender` or the `build-popularity` CLI, never in a route or service)
+- [x] Recommender package independent of FastAPI/ORM (`packages/recommender` now has real contracts/engines/providers/artifacts — still zero FastAPI/SQLAlchemy dependencies, verified by the same repo-hygiene test, now exercising real content instead of an empty skeleton)
+- [x] Service-owned transactions (`recommendations/service.py` explicitly ends its read transaction before calling the provider and commits again afterward — spec §11's hard ordering constraint, ADR-0007 — in addition to the pattern already established by every other service)
+- [x] Append-only events (unchanged this phase — recommendation *impressions* are their own dedicated table, spec §8.10, not `interaction_events`)
+- [x] Environment config (typed `Settings` covering every §11 category — `recommendation_provider`/`artifact_storage_*` now actually consumed, not just declared)
+- [x] Storage abstractions (`ObjectStorage`/`LocalFileStorage` for covers unchanged; `packages/recommender`'s own `LocalArtifactStorage` for model artifacts, spec §10.13 — S3 for both still deferred, see §6)
+- [x] Explicit ID mappings (`work_id -> books.id` unchanged; the `book_id`/`work_id`/`model_item_index` triple for model artifacts is now real, spec §7.5 — `ArtifactManifest.item_mapping`)
 
 ### Quality
 
-- [x] Empty-db migrations (`tests/integration/test_migrations.py`: fresh database, `upgrade head`, plus an explicit `downgrade base` → `upgrade head` round trip; re-verified after adding the Phase 4 migration, including a live re-run against the dev database)
-- [x] Critical tests for what exists (health, config, storage safety, catalog import, migrations, username/shelf-name rules, password/token/JWT primitives, rating-scale conversion, cursor codec, rate limiting, full auth HTTP lifecycle, CSRF, every §5.3 state transition and its event, shelf CRUD/ownership/collage/sync atomicity, `/me/ratings` across all sorts/filters/pagination — 175 tests total: 102 unit + 73 integration; 94% combined coverage on `book_app`, every Phase 4 module at 96–100%)
+- [x] Empty-db migrations (`tests/integration/test_migrations.py`: fresh database, `upgrade head`, plus an explicit `downgrade base` → `upgrade head` round trip; re-verified after adding the Phase 5 migration, including a live re-run against the dev database)
+- [x] Critical tests for what exists (everything Phase 0-4 already covered, plus: recommendation eligibility rules, engine/provider contract tests incl. fallback and empty-pool handling, cursor logic for recommendation batches, error mapping for the cursor-invalid/503 cases, the popularity support-adjustment formula — 247 tests total: 109 apps/api unit + 100 integration + 38 recommender package; 95% combined coverage on `book_app`)
 - [ ] E2E flow (Phase 9)
-- [x] Lint/type/build success for everything created this pass, including `tests/integration` (see §5c command log)
+- [x] Lint/type/build success for everything created this pass, including `tests/integration` and `packages/recommender` (see §5d command log)
 - [x] No secrets committed (`.env` gitignored, only `.env.example` with fake values tracked)
 - [x] No stack traces exposed (shared exception handler returns the §9.8 envelope only)
 - [ ] Keyboard accessibility (no interactive UI yet beyond a smoke page)
@@ -564,6 +663,55 @@ curl -s -b /tmp/c http://127.0.0.1:8000/api/v1/me/ratings
 
 Result: all green — see the acceptance checklist above for the exact counts
 and coverage this run produced.
+
+## 5d. Phase 5 validation commands and results
+
+```bash
+# Migrations (adds model_versions/recommendation_requests/results/impressions)
+make db-start
+cd apps/api
+uv run alembic upgrade head
+uv run alembic check                             # only the pre-existing trigram-index false positive
+uv run alembic downgrade base && uv run alembic upgrade head   # full round trip again
+uv run python -m book_app.cli.import_catalog     # re-import; the round trip wipes the dev DB's catalog
+
+# Lint/types — apps/api, packages/recommender, and tests/ each have their
+# own config; tests/ must be checked via the exact make-lint invocation
+# (repo root, no explicit --config) — apps/api's own 100-char config does
+# NOT apply there, only its 88-char built-in default does (see risk #35).
+uv run ruff format --check . && uv run ruff check . && uv run mypy .
+cd ../../packages/recommender
+uv run ruff format --check . && uv run ruff check . && uv run mypy .
+cd ../..
+uv run --project apps/api ruff format --check tests
+uv run --project apps/api ruff check tests
+
+# Unit tests (109 apps/api + 38 recommender) + integration (100) + combined coverage
+cd apps/api
+uv run pytest -q                                                          # unit only
+uv run pytest tests ../../tests/integration --cov=book_app --cov-report=term-missing   # 95%
+cd ../../packages/recommender && uv run pytest -q                          # 38 passed
+
+# Build the popularity artifact against the real dev database, then
+# live-smoke-test both provider configurations
+cd ../../apps/api
+make build-popularity    # from repo root; ranks all 92,524 active books
+uv run uvicorn book_app.main:app --host 127.0.0.1 --port 8000 &
+curl -sc /tmp/c5 -X POST http://127.0.0.1:8000/api/v1/auth/register -H "Content-Type: application/json" \
+  -d '{"username":"demo5","password":"correct horse battery staple","password_confirmation":"correct horse battery staple"}'
+curl -sc /tmp/c5 -b /tmp/c5 -X POST http://127.0.0.1:8000/api/v1/auth/login -H "Content-Type: application/json" \
+  -d '{"username":"demo5","password":"correct horse battery staple"}'
+curl -s -b /tmp/c5 "http://127.0.0.1:8000/api/v1/recommendations/home?limit=5"
+curl -s -b /tmp/c5 "http://127.0.0.1:8000/api/v1/recommendations/books/1/similar?limit=5"
+# repeat against a second instance started with RECOMMENDATION_PROVIDER=popularity
+```
+
+Result: all green — see the acceptance checklist above for the exact counts
+and coverage this run produced. Live smoke test confirmed correct behavior
+under both `mock` and `popularity` provider configurations, including that
+the popularity-provider response's `model_version` matched the artifact
+`build-popularity` had just produced and its top-ranked books were
+plausible (classics with large, consistently-high rating support).
 
 ## 6. Risks and assumptions
 
@@ -800,14 +948,101 @@ conservative, reversible default and document it."
     itself to module level (`_SORT_QUERY_PARAM = Query(...)`), not just the
     enum value passed into it; the latter still gets flagged, since the
     call itself is still evaluated inline.
+33. **`session_exclusions` (spec §10.6) has no concrete server-side source
+    this phase.** The persisted-batch design (ADR-0007) already guarantees
+    spec §5.5's "books already returned in the current feed session" *within*
+    one batch — unique book_ids, fixed positions — so the only remaining
+    gap is repeat exposure *across* separate top-level requests in one
+    browsing session, and nothing in the spec describes a session-tracking
+    mechanism for that (the ~30-day auth session is far too long-lived to
+    mean "current feed session"). Resolved conservatively: `GET
+    /recommendations/*` accepts an optional `exclude` query param
+    (comma-separated book ids, capped at 500, malformed entries silently
+    skipped) that the frontend can populate from its own in-memory
+    "already rendered" list. A real solution if the spec's intent turns out
+    to be something more specific later.
+34. **The recommendation provider is built lazily, on first request, not
+    eagerly in `create_app()`.** Spec §10.13 says "load once at startup",
+    but `main.py`'s own docstring establishes a stronger, pre-existing
+    constraint: tests must be able to construct the app without a live
+    database, since most of them have nothing to do with recommendations.
+    The mock engine's candidate pool needs a real query (spec §10.11: it
+    has no DB access of its own), which would violate that if run eagerly
+    — every integration test defaults to `recommendation_provider=mock`.
+    Resolved by caching the built provider on `app.state` on first access
+    via the dependency function instead (`modules/recommendations/
+    dependencies.py`) — "once, cached for the process's life," just
+    triggered a beat later than literal process start.
+35. **Ruff formats/lints `tests/` differently depending on invocation
+    directory, and this was already true before this phase — Phase 5 just
+    had the first lines long enough to land in the gap.** `apps/api/pyproject.toml`
+    declares `line-length = 100` and marks `src`/`tests` as first-party
+    import roots; the repo root has no `[tool.ruff]` section at all. Running
+    `ruff format <file>` from *within* `apps/api` (even targeting a file
+    under the repo-root `tests/` via a relative path) picks up apps/api's
+    config and its 100-char width. Running the exact command `make lint`
+    itself uses — `uv run --project apps/api ruff format --check tests`
+    from the *repo root*, no `cd` first — gets ruff's bare 88-char default
+    instead (`--project` only selects which venv runs the `ruff`
+    executable, not which config it discovers) and treats `book_app.*`/
+    `book_recommender.*` as ordinary third-party imports rather than a
+    separate first-party group. Both are internally consistent, self
+    -contained runs; they just disagree with each other, and only the
+    repo-root/no-`cd` form is what CI actually enforces. Whichever way a
+    `tests/` file was last formatted, verify it against that exact
+    unprefixed invocation before considering it clean — this has now
+    surfaced identically in both Phase 4 and Phase 5.
+36. **`_clean_all_tables` (integration test fixture) didn't truncate the
+    four new Phase 5 tables**, `model_versions` chief among them — it has
+    no foreign key to `users`/`books`/`shelves` at all, so `TRUNCATE ...
+    CASCADE` on those tables never reaches it regardless. Three new tests
+    failed with stale `model_versions` rows leaking across test functions
+    within the same session before this was caught (the exact same class
+    of gap as Phase 4's own equivalent miss for its four tables — the
+    fixture needs an explicit update every phase that adds tables with no
+    inbound FK from an already-listed one).
+37. **A popularity-formula test's own premise was wrong, not the formula.**
+    `test_high_support_high_rating_book_outranks_low_support_perfect_book`
+    initially inserted only the two books being compared; with just two
+    rows, the "catalog-wide mean" the Bayesian shrinkage pulls toward *is*
+    the average of those same two books, which defeats the entire premise
+    (shrinking a 5.0-rated book toward a mean that's mostly its own 5.0
+    barely shrinks it at all). Fixed by adding twenty realistic "anchor"
+    books so the mean actually resembles a catalog-wide one — a reminder
+    that a small, hand-crafted integration-test universe can silently
+    contaminate exactly the statistic a test is trying to hold fixed.
+38. **`model_versions.status`'s enum values (`READY`/`ACTIVE`/`RETIRED`)
+    have no spec-given list**, unlike `catalog_status`/`account_status`
+    which spec §8.3/§8.1 spell out explicitly. Chosen as the minimal
+    lifecycle this phase's own code actually exercises — `build-popularity`
+    writes `ACTIVE` directly (no separate activation step/endpoint exists),
+    and retires whichever version was previously active for the same
+    `model_name`. `READY` is provisioned for a future build/validate/activate
+    split but nothing produces it yet.
+39. **`engines/` is a fifth `packages/recommender` subdirectory beyond
+    spec §10.1's literal four** (`contracts/ providers/ artifacts/
+    exceptions.py`). The engine *protocol* lives in `contracts/`, exactly
+    as specified; engine *implementations* (mock/popularity/future-pipeline)
+    needed a home the spec doesn't name, and grouping them as a sibling to
+    `providers/` (which is where they're consumed) reads more clearly than
+    folding them into `providers/` itself. Purely additive — nothing
+    required moved.
+40. **`bx_explicit` is counted a second time inside the popularity
+    formula's `support` sum**, on top of `bx_ratings` — verified first,
+    against the real dev database, that `bx_explicit <= bx_ratings` holds
+    for every active row (so it's a genuine subset, not an independent
+    count), then chose to count it again anyway as a deliberate weight:
+    explicit engagement is a stronger signal than the raw Book-Crossing
+    rating count, which likely mixes in weaker implicit signals. A design
+    choice, not a double-counting bug — flagged here so it reads as one on
+    a future re-read of the formula.
 
 ## 7. Next phase
 
-**Phase 5 — Recommendation boundary.** `packages/recommender` gets its real
-shape (`contracts/`, `providers/`, `artifacts/`, `exceptions.py`); mock +
-popularity engines; in-process + fallback providers; request/result/
-impression persistence; cursor pagination; the three recommendation
-endpoints (`GET /recommendations/home`, `.../shelves/{id}`,
-`.../books/{id}/similar`); contract tests. Explicitly not the final
-collaborative/content funnel (spec §2). Do not start without explicit
-instruction.
+**Phase 6 — Frontend shell/auth.** Dark design system/tokens; shell +
+navigation (left rail + top bar); search bar (UI only — no backend search
+exists yet, spec §18 doesn't ask for it until later); register/login pages;
+`AuthProvider` + current-user bootstrap; a generated API client from the
+FastAPI OpenAPI schema (`make generate-api-client`). First frontend phase —
+everything built so far (Phases 1-5) has been backend-only. Do not start
+without explicit instruction.

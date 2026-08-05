@@ -156,6 +156,7 @@ source = { editable = "apps/api" }
 dependencies = [
     { name = "alembic" },
     { name = "argon2-cffi" },
+    { name = "book-recommender-engine" },
     { name = "fastapi" },
     { name = "pandas" },
     { name = "psycopg", extra = ["binary"] },
@@ -182,6 +183,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
     { name = "argon2-cffi", specifier = ">=23.1" },
+    { name = "book-recommender-engine", editable = "packages/recommender" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
@@ -208,6 +210,9 @@ dev = [
 name = "book-recommender-engine"
 version = "0.1.0"
 source = { editable = "packages/recommender" }
+dependencies = [
+    { name = "pydantic" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -217,6 +222,7 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.9" }]
 
 [package.metadata.requires-dev]
 dev = [

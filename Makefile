@@ -82,7 +82,7 @@ seed-demo: ## Create the local demo user with representative shelves/ratings/sav
 	@echo "Not implemented yet - lands in Phase 4+ (see docs/implementation/plan.md)."
 
 build-popularity: ## Build the popularity recommendation artifact
-	@echo "Not implemented yet - lands in Phase 5 (see docs/implementation/plan.md)."
+	cd apps/api && uv run python -m book_app.cli.build_popularity
 
 ## --- Quality gates -----------------------------------------------------------
 

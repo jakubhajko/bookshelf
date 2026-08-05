@@ -290,3 +290,67 @@ def get_genre_names_for_book(session: Session, book_id: int) -> list[str]:
         .order_by(BookGenre.position)
     )
     return [row.name for row in session.execute(stmt)]
+
+
+# --- Read-side queries (Phase 5: recommendations) ---------------------------
+
+
+def get_catalog_version(session: Session) -> str:
+    """A cheap, stable fingerprint of the active catalog (spec §10.6/§10.13's
+    "catalog version") — changes only when books are added/updated/removed
+    via reimport, not on every request."""
+    stmt = select(func.count(), func.max(Book.updated_at)).where(
+        Book.catalog_status == CatalogStatus.ACTIVE
+    )
+    count, max_updated_at = session.execute(stmt).one()
+    return f"{count}:{max_updated_at.isoformat() if max_updated_at else 'none'}"
+
+
+def get_active_book_ids(session: Session, *, limit: int) -> list[int]:
+    """Real, active book_ids for the mock engine's candidate pool — it has
+    no database access of its own (spec §10.1), so the application supplies
+    real ids (spec §10.11: mock must "return unique active books")."""
+    stmt = (
+        select(Book.id)
+        .where(Book.catalog_status == CatalogStatus.ACTIVE)
+        .order_by(Book.id)
+        .limit(limit)
+    )
+    return list(session.execute(stmt).scalars())
+
+
+@dataclass(frozen=True)
+class CatalogCardRow:
+    """Card-level fields only (spec §12.6: title, primary author, cover — no
+    genres/description, that's the detail page). Recommendation results
+    never need more than this: spec §5.5's eligibility rules mean a
+    recommended book can never already have a rating/shelf/Not-Interested
+    state, so there's no badge to enrich for either."""
+
+    book_id: int
+    work_id: str
+    title: str
+    primary_author_name: str | None
+    cover_object_key: str | None
+
+
+def get_catalog_cards(session: Session, book_ids: Sequence[int]) -> dict[int, CatalogCardRow]:
+    """Restricted to currently-ACTIVE books — doubles as the defensive
+    validation spec §10.8 asks the application to perform on provider
+    output: any candidate id absent from the returned dict is either gone
+    or no longer active, and the caller drops it."""
+    if not book_ids:
+        return {}
+    stmt = select(
+        Book.id, Book.work_id, Book.title, Book.primary_author_name, Book.cover_object_key
+    ).where(Book.id.in_(book_ids), Book.catalog_status == CatalogStatus.ACTIVE)
+    return {
+        row.id: CatalogCardRow(
+            book_id=row.id,
+            work_id=row.work_id,
+            title=row.title,
+            primary_author_name=row.primary_author_name,
+            cover_object_key=row.cover_object_key,
+        )
+        for row in session.execute(stmt)
+    }

@@ -75,8 +75,8 @@ make typecheck              mypy (backend/recommender) + tsc (frontend)
 make migrate                 apply Alembic migrations
 make import-data[-dry-run]   import books.parquet into PostgreSQL
 make cleanup-sessions        delete expired/revoked auth sessions
-make seed-demo               demo user/data (Phase 4+)
-make build-popularity        popularity recommendation artifact (Phase 5)
+make seed-demo               demo user/data (Phase 9)
+make build-popularity        build the popularity recommendation artifact
 make e2e                     Playwright critical-flow tests (Phase 9)
 make generate-api-client     frontend client from the OpenAPI schema (Phase 6)
 ```
@@ -86,20 +86,27 @@ exit 0 rather than fail — see `docs/implementation/plan.md` §6.
 
 ## Current status
 
-Phases 0-4 are complete: monorepo foundations, the full catalog data layer
+Phases 0-5 are complete: monorepo foundations, the full catalog data layer
 (92,526 books imported, search indexes proven against a live fuzzy query),
 authentication — register/login/refresh/logout/me/change-password (spec
 §9.1), Argon2id passwords, HttpOnly cookie sessions with DB-backed revocable
 refresh sessions, session-bound CSRF, and a pluggable per-IP/per-username
-login rate limiter — and books/state/shelves: book detail (`GET
-/books/{id}`), half-star ratings and Not Interested with the full spec
-§5.2-§5.3 state machine and append-only event log, shelves CRUD with
-atomic multi-shelf sync, and `/me/ratings` (all 5 sorts, rating-range/genre
-filters, cursor pagination). 175 tests (102 unit + 73 integration against
-real PostgreSQL), 94% combined coverage. Recommendations, search, and all
-product UI don't exist yet — see the phase-by-phase plan and acceptance
-checklist in [`docs/implementation/plan.md`](docs/implementation/plan.md)
-for exactly what's done versus what Phase 5 onward adds.
+login rate limiter — books/state/shelves: book detail (`GET /books/{id}`),
+half-star ratings and Not Interested with the full spec §5.2-§5.3 state
+machine and append-only event log, shelves CRUD with atomic multi-shelf
+sync, and `/me/ratings` (all 5 sorts, rating-range/genre filters, cursor
+pagination) — and the recommendation boundary: `packages/recommender`
+(typed contracts, mock/popularity/future-pipeline engines, in-process/
+fallback/remote providers, artifact manifest + local storage), a
+Bayesian-shrunk popularity ranking CLI (`make build-popularity`), and all
+three recommendation endpoints (`GET /recommendations/home`,
+`.../shelves/{id}`, `.../books/{id}/similar`) with persisted, cursor
+-paginated batches and product-eligibility exclusion (spec §5.5). 247 tests
+(109 apps/api unit + 100 integration + 38 recommender package against real
+PostgreSQL), 95% combined coverage. Search and all product UI don't exist
+yet — see the phase-by-phase plan and acceptance checklist in
+[`docs/implementation/plan.md`](docs/implementation/plan.md) for exactly
+what's done versus what Phase 6 onward adds.
 
 ## AWS design
 

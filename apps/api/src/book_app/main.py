@@ -24,6 +24,7 @@ from book_app.modules.auth.api import router as auth_router
 from book_app.modules.auth.dependencies import build_auth_rate_limiter
 from book_app.modules.books.api import router as books_router
 from book_app.modules.interactions.api import router as interactions_router
+from book_app.modules.recommendations.api import router as recommendations_router
 from book_app.modules.shelves.api import router as shelves_router
 
 API_PREFIX = "/api/v1"
@@ -59,6 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(books_router, prefix=API_PREFIX)
     app.include_router(shelves_router, prefix=API_PREFIX)
     app.include_router(interactions_router, prefix=API_PREFIX)
+    app.include_router(recommendations_router, prefix=API_PREFIX)
 
     return app
 

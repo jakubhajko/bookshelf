@@ -3,7 +3,9 @@ name = "book-recommender-engine"
 version = "0.1.0"
 description = "Typed recommendation engine/provider package — no FastAPI or ORM dependencies (see docs/adr/0006-recommender-provider-boundary.md)."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pydantic>=2.9",
+]
 
 [dependency-groups]
 dev = [

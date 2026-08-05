@@ -217,3 +217,25 @@ def get_owned_shelf_ids(session: Session, *, user_id: UUID, shelf_ids: Sequence[
         return set()
     stmt = select(Shelf.id).where(Shelf.user_id == user_id, Shelf.id.in_(shelf_ids))
     return set(session.execute(stmt).scalars().all())
+
+
+# --- Read-side queries (Phase 5: recommendation context/eligibility) --------
+
+
+def get_all_shelved_book_ids(session: Session, *, user_id: UUID) -> set[int]:
+    """Every book on any of this user's shelves — spec §5.5: Home excludes
+    "books saved to any shelf"."""
+    stmt = (
+        select(ShelfBook.book_id)
+        .join(Shelf, Shelf.id == ShelfBook.shelf_id)
+        .where(Shelf.user_id == user_id)
+    )
+    return set(session.execute(stmt).scalars())
+
+
+def get_book_ids_in_shelf(session: Session, *, shelf_id: UUID) -> set[int]:
+    """Books already in *this* shelf — spec §5.5: shelf discovery excludes
+    "books already in that shelf" (books on *other* shelves remain eligible,
+    which is exactly what scoping this to one shelf_id gives for free)."""
+    stmt = select(ShelfBook.book_id).where(ShelfBook.shelf_id == shelf_id)
+    return set(session.execute(stmt).scalars())

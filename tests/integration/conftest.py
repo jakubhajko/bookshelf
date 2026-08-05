@@ -98,7 +98,10 @@ def _clean_all_tables(test_engine: Engine) -> None:
         conn.execute(
             text(
                 "TRUNCATE TABLE auth_sessions, shelf_books, shelves, user_book_states, "
-                "interaction_events, users, "
+                "interaction_events, "
+                "recommendation_impressions, recommendation_results, "
+                "recommendation_requests, model_versions, "
+                "users, "
                 "book_source_similarities, book_catalog_shelf_tags, "
                 "book_genres, book_authors, catalog_shelf_tags, genres, authors, books "
                 "RESTART IDENTITY CASCADE"
