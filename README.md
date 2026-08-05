@@ -86,7 +86,7 @@ exit 0 rather than fail — see `docs/implementation/plan.md` §6.
 
 ## Current status
 
-Phases 0-6 are complete: monorepo foundations, the full catalog data layer
+Phases 0-7 are complete: monorepo foundations, the full catalog data layer
 (92,526 books imported, search indexes proven against a live fuzzy query),
 authentication — register/login/refresh/logout/me/change-password (spec
 §9.1), Argon2id passwords, HttpOnly cookie sessions with DB-backed revocable
@@ -101,23 +101,30 @@ fallback/remote providers, artifact manifest + local storage), a
 Bayesian-shrunk popularity ranking CLI (`make build-popularity`), and all
 three recommendation endpoints (`GET /recommendations/home`,
 `.../shelves/{id}`, `.../books/{id}/similar`) with persisted, cursor
--paginated batches and product-eligibility exclusion (spec §5.5) — and now
-the frontend shell and auth flow: a generated, fully-typed API client
-(`make generate-api-client`, backend OpenAPI schema → `openapi-typescript` →
-`openapi-fetch`), the dark design token system (Tailwind v4 `@theme`),
-register/login/account pages, `AuthProvider` with session bootstrap and a
-CSRF-aware, session-refreshing API client, and the navigation shell (left
-rail, bottom nav, top bar with search, avatar menu) with every spec §12.3
-route wired behind the appropriate auth guard. 262 tests (109 apps/api unit
-+ 100 integration + 38 recommender package against real PostgreSQL + 15
-frontend), 95% combined backend coverage. The frontend routes beyond
-auth/shell (search, book detail, shelves, rated) are still placeholders —
-see the phase-by-phase plan and acceptance checklist in
-[`docs/implementation/plan.md`](docs/implementation/plan.md) for exactly
-what's done versus what Phase 7 onward adds. Frontend UI has been verified
-via a production build and an HTTP-level smoke test against the live
-backend, not via an interactive browser (none is available in this
-environment — see plan.md risk #44).
+-paginated batches and product-eligibility exclusion (spec §5.5) — the
+frontend shell and auth flow: a generated, fully-typed API client, the dark
+design token system, register/login/account pages, `AuthProvider`, and the
+navigation shell with every spec §12.3 route wired behind the appropriate
+auth guard — and now the core visual product: a real, cover-image-serving
+backend route (`GET /api/v1/covers/{object_key}`, ADR-0011 — the app
+renders actual book covers now, not placeholders), a responsive masonry
+Home feed with infinite scroll wired to `GET /recommendations/home`, book
+cards with a searchable/multi-select/create-capable shelf selector and a
+Pinterest-style Save/Saved quick action, and book detail — as both a
+route-backed modal (desktop) and a full page (direct navigation/mobile) —
+with an accessible half-star rating control, a Not-Interested control that
+confirms before clearing an existing rating, and a similar-books grid,
+all wired with optimistic updates and rollback on failure (spec §12.11).
+293 tests (118 apps/api unit + 100 integration + 38 recommender package
+against real PostgreSQL + 37 frontend), 94% combined backend coverage. The frontend routes beyond Home/detail (search, shelves, rated)
+are still placeholders — see the phase-by-phase plan and acceptance
+checklist in [`docs/implementation/plan.md`](docs/implementation/plan.md)
+for exactly what's done versus what Phase 8 onward adds. Frontend UI has
+been verified via a production build, 37 component/integration tests, and
+an HTTP-level smoke test against the live backend (which caught and fixed a
+real cover-image path-resolution bug, plan.md risk #47) — not via an
+interactive browser, none is available in this environment (plan.md risk
+#44).
 
 ## AWS design
 

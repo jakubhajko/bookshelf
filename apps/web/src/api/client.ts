@@ -17,7 +17,7 @@
 import createClient, { type Middleware } from 'openapi-fetch'
 import type { paths } from './generated/schema'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
 const REFRESH_PATH = '/api/v1/auth/refresh'
 const CSRF_EXEMPT_PATHS = new Set(['/api/v1/auth/register', '/api/v1/auth/login', REFRESH_PATH])
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])

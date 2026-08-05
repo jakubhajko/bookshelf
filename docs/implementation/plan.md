@@ -515,11 +515,156 @@ Phases mirror spec §18 exactly. Status is updated as work lands.
   mitigated by the HTTP-level smoke test above plus a clean production
   build).
 
-### Phase 7 — Core frontend — not started
+### Phase 7 — Core frontend — **done, this pass**
 
-Masonry grid, cards with shelf selector + save overlay, Home feed, book
-detail modal/route, rating control, Not-Interested control, similar-books
-grid, optimistic updates with rollback.
+- **Cover image serving** (`apps/api/src/book_app/core/covers.py`, new):
+  `GET /api/v1/covers/{object_key}` — the first thing in this codebase to
+  actually render an image, and spec §20 forbids constructing cover paths
+  in the frontend, so something on the backend had to turn the opaque
+  `cover_object_key` every book/shelf/recommendation response already
+  carries into a fetchable URL. Deliberately the one **unauthenticated**
+  route in the app (cover art is public; a browser `<img>` tag never gets
+  `client.ts`'s session-refresh-and-retry treatment, so gating it behind
+  the ~15-minute access token would turn covers into broken images
+  mid-session). Reuses Phase 2's `LocalFileStorage`/`UnsafeObjectKeyError`
+  for safe path resolution — new here is `app.state.cover_storage` actually
+  being constructed and wired into a request path for the first time. See
+  ADR-0011.
+- **A real, live-smoke-test-only bug, found and fixed**:
+  `cover_storage_local_path`'s documented default is a bare relative path
+  (`data/processed/covers`), which resolves against the process's *current
+  working directory* — `apps/api/` for `make dev-api` (its own
+  `cd apps/api &&`), not the repo root where `data/` actually lives. Every
+  cover 404'd the moment this was tested against a real dev server started
+  the documented way, even though the exact same fixture-based unit tests
+  (§ below) passed cleanly first, since `tmp_path` fixtures are always
+  absolute and never exercise that branch. Fixed with
+  `resolve_cover_storage_root()`, anchoring relative paths at the repo root
+  via `Path(__file__).resolve().parents[5]` — the identical pattern
+  Phase 5's `modules/recommendations/artifact_paths.py` already established
+  for the same class of problem (and Phase 2/6's `import_catalog.py`/
+  `export_openapi.py` each have their own copy too) — kept as a fourth,
+  separate local copy rather than refactored into one shared utility (spec
+  §20: "do not add unused abstractions"; CLAUDE.md: "three similar lines is
+  better than a premature abstraction" — this is the established,
+  repeated convention in this codebase, not something to consolidate
+  mid-bugfix). See risk #47.
+- **Frontend API layer**: `api/covers.ts` (`coverUrl()` — the one
+  URL-building helper in the app, appending an opaque backend-issued key to
+  a fixed backend-owned route, which is what spec §20 actually rules out
+  avoiding, not this), `api/books.ts`, `api/shelves.ts`,
+  `api/recommendations.ts`, and `queryKeys.ts` extended with
+  `shelves`/`books.detail`/`books.state`/`recommendations.home`/
+  `recommendations.similar`.
+- **Shared per-book state cache** (`hooks/useBookState.ts`): one TanStack
+  Query cache entry per book (`queryKeys.books.state`), shared by every
+  card and the detail page showing that book — necessary because no single
+  endpoint returns full state (`PreferenceState` has rating/not-interested
+  but not `shelf_ids`; `ShelfIdsResponse` is the reverse), and because
+  Home-feed cards never fetch it directly at all: spec §5.5 eligibility
+  guarantees every book `GET /recommendations/home` returns starts Neutral
+  and unsaved, so a `NEUTRAL_STATE` default is correct, not a
+  loading placeholder. `useBookDetailQuery` seeds this cache from
+  `GET /books/{id}`'s authoritative `user_state`; five mutation hooks
+  (`useSetRatingMutation`, `useRemoveRatingMutation`,
+  `useSetNotInterestedMutation`, `useRemoveNotInterestedMutation`,
+  `useSyncShelvesMutation`) each optimistically patch it via `onMutate`,
+  roll back via `onError`, and reconcile with the real server response via
+  `onSuccess` — spec §12.11's "optimistic updates ... with rollback and
+  authoritative invalidation," applied uniformly everywhere a card or the
+  detail page can act on a book.
+- **Masonry grid** (`components/BookMasonryGrid.tsx`,
+  `hooks/useColumnCount.ts`): items distributed round-robin by index into
+  N column arrays (N from a `resize`-driven breakpoint hook — jsdom
+  implements neither `matchMedia` nor `IntersectionObserver`, verified
+  directly, so `matchMedia` was avoided rather than requiring a test
+  polyfill for a hook that a plain `resize` listener does just as well),
+  each column an independent vertical flex stack. Deliberately **not** CSS
+  multi-column layout, which rebalances the *entire* list into new columns
+  as it grows and would violate spec §12.4's explicit "stable rendered
+  order" the moment infinite scroll appends a page; round-robin's
+  per-item column assignment never changes when items are appended at the
+  end, and unlike a shortest-column-fill algorithm it needs no real image
+  height measurement to decide placement. Breakpoint→column mapping is a
+  documented, conservative pick from spec §12.5's given ranges (risk #52).
+- **Cards** (`components/BookCard.tsx`, `ShelfSelectorPopover.tsx`,
+  `BookCover.tsx`): cover (real aspect ratio preserved, title/author
+  placeholder tile on a missing or failed-to-load cover, spec §12.5) +
+  title/author below it + a hover/focus overlay (visible by default below
+  `md`, hover-gated above it — spec §12.6's "touch controls remain usable
+  without hover") with a shelf-selector button (top-left) and a Save/Saved
+  button (top-right). The shelf selector is a Radix `Popover` around plain
+  native checkboxes rather than a custom listbox/combobox — searchable,
+  multi-select, create-a-shelf-inline, all satisfied with maximally
+  accessible native controls instead of hand-rolled ARIA (ADR-0008).
+  Clicking "Saved" opens the same selector (review/edit) rather than
+  instantly unsaving; clicking "Save" saves straight to the session's
+  last-used shelf (`hooks/useLastUsedShelf.ts`, `sessionStorage`-backed)
+  or opens the selector if there isn't one yet — a Pinterest-informed
+  reading of an underspecified interaction, documented at risk #49.
+- **Detail** (`components/BookDetailContent.tsx`,
+  `routes/BookDetail.tsx`, `routes/BookDetailModal.tsx`): every spec §12.7
+  field (cover, title/authors, description, year/pages/publisher/
+  language/format, genres, external rating, user rating, shelf controls,
+  Not Interested, similar grid) — **except** a dedicated "series" display,
+  which real data showed has no honest way to render (risk #48).
+  `RatingStars.tsx` — five stars, ten accessible half-step values, built
+  from native radio inputs sharing one `name` (roving-tabindex/arrow-key
+  navigation is a browser feature at that point, not custom JS) plus a
+  separate remove action. `NotInterestedControl.tsx` — confirms via a
+  Radix `AlertDialog` only when clearing an existing rating (spec §12.7),
+  proceeds immediately otherwise. **Route-backed modal**
+  (`routing/modalNavigation.ts`, `App.tsx`'s `AppRoutes`): desktop modal
+  over the prior page, mobile full-screen, direct navigation renders the
+  plain full page — the standard React Router "two `<Routes>`, one keyed
+  off a `state.backgroundLocation`" pattern, which also means the page
+  underneath a modal never unmounts, so its scroll position survives for
+  free without any extra code.
+- **Home** (`routes/Home.tsx`): shelf-lens row (For You + each shelf,
+  fetched from `GET /shelves` — clicking a shelf chip navigates to that
+  shelf's own `/shelves/:id/discover` rather than rendering shelf-scoped
+  recommendations inline, since that route's actual content is Phase 8
+  scope, risk #50) — a dismissible guidance banner for a visitor with no
+  shelves yet (spec §12.4's "subtle guidance message... no forced
+  onboarding," risk #53) — `useInfiniteQuery` against
+  `GET /recommendations/home` with an `IntersectionObserver` sentinel
+  driving `fetchNextPage` — skeleton/retry/empty states — manual
+  `sessionStorage`-keyed scroll restoration (`hooks/useScrollRestoration.ts`;
+  React Router's built-in `<ScrollRestoration>` only exists for the
+  data-router API, not the declarative `<BrowserRouter>` this app's modal
+  pattern needs, risk #57).
+- **Tests**: 22 new frontend tests across 5 new files (was 15/7 after
+  Phase 6) — `RatingStars` (half-step values, checked state, remove
+  action), `ShelfSelectorPopover` (search/filter, multi-select sync,
+  create-new, no-duplicate-create), `NotInterestedControl` (confirms only
+  when clearing a rating, cancel leaves state untouched), `BookCard`
+  (optimistic Saved badge, rollback to Save on a failed request),
+  `App.test.tsx` (direct navigation renders the plain page with no
+  `role="dialog"`; in-app navigation renders the modal with the background
+  page still mounted underneath) — 37 frontend tests total. Backend: 7 new
+  tests for `core/covers.py` (found/missing/path-traversal/no-auth/
+  relative-path-anchoring/absolute-passthrough/repo-root-sanity) — 218
+  apps/api tests total (94% coverage), 38 recommender (unchanged).
+  `test/setup.ts` gained two environment stubs after live-diagnosing real
+  jsdom gaps: `IntersectionObserver` (unimplemented in jsdom entirely) and
+  `localStorage`/`sessionStorage` (Node 26's own native, experimental
+  implementation shadows jsdom's working one and throws without a
+  `--localstorage-file` flag this repo has no reason to require) — risk
+  #56.
+- **Live smoke-tested** against the real dev database and the exact
+  `make dev-api` launch convention (catching the cover-path bug above):
+  home feed → rate a book → book detail reflects it → create a shelf →
+  sync a different book onto it → similar books → cover bytes for a key
+  taken from a real home-feed response, all against real data (92,524
+  books), clean server logs throughout. No interactive browser tool is
+  available in this environment (see risk #44 from Phase 6, still true) —
+  both dev servers were left running for manual verification.
+- **Not built**: Shelf/Rated/Search page content (Phase 8 — cards, the
+  masonry grid, and the shared book-state cache built this phase are
+  already reusable there); `exclude`-based cross-request duplicate
+  suppression for Home (risk #55); infinite scroll on the detail page's
+  similar-books section (single page, risk #54); an automated accessibility
+  audit (Phase 9).
 
 ### Phase 8 — Shelves/Rated/Search — not started
 
@@ -543,11 +688,11 @@ on the basis of intent, only of a passing command.
 - [x] Username/password registration and persistent login state (register/login/refresh/logout/me/change-password all live and integration-tested against real PostgreSQL — spec §9.1)
 - [x] Logout/login preserves shelves/history (all state keyed by durable `user_id` in Postgres — shelves/ratings/events now exist and are integration-tested independently of any one session; not re-verified as one single logout-then-log-back-in-then-check-shelves test, but the two halves — session durability from Phase 3, per-user state persistence from this phase — are each already proven separately)
 - [x] Parquet catalog import (`make import-data`; full 92,526-row catalog imported and verified — see Phase 2)
-- [x] Local covers (`LocalFileStorage` + safe path resolution, spec §7.3 — storage-layer concern only; spec §9 lists no cover-serving HTTP route, so there's nothing further for the API to add here. Correcting this plan's own Phase 2/3-era note, which incorrectly expected one in Phase 4)
-- [x] Home feed through provider (`GET /recommendations/home`, spec §9.5 — mock and popularity providers both live-tested)
-- [ ] Title/author search (backend not built — not in Phase 5's own spec §18 bullet list either; the frontend search bar exists and navigates to `/search?q=...`, but that route itself is still a Phase 7/8 `ComingSoon` placeholder)
-- [x] Book detail (`GET /books/{id}` — spec §12.7's fields minus the similar-books grid, which is this phase's `GET /recommendations/books/{id}/similar`, now also live)
-- [x] Half-star ratings (`PUT/DELETE /books/{id}/rating`, spec §9.2 half-step conversion)
+- [x] Local covers (`LocalFileStorage` + safe path resolution, spec §7.3, now actually serving requests via `GET /api/v1/covers/{object_key}`, spec §20/ADR-0011 — **correcting this plan's own Phase 4/6-era note**, which read spec §9's silence on a cover route as meaning none was needed; Phase 7 needed to actually render an image for the first time and found spec §20's "do not construct cover paths in frontend" requires exactly this route to exist)
+- [x] Home feed through provider (`GET /recommendations/home`, spec §9.5 — mock and popularity providers both live-tested; now rendered end to end, masonry grid + infinite scroll + skeleton/retry/empty states, spec §12.4)
+- [ ] Title/author search (backend not built — not in Phase 5's own spec §18 bullet list either; the frontend search bar exists and navigates to `/search?q=...`, but that route itself is still a Phase 8 `ComingSoon` placeholder)
+- [x] Book detail (`GET /books/{id}` — spec §12.7's fields (minus a dedicated "series" display, see risk #48) now rendered end to end, including the similar-books grid, `GET /recommendations/books/{id}/similar`, as a route-backed modal on desktop and a full page on direct navigation)
+- [x] Half-star ratings (`PUT/DELETE /books/{id}/rating`, spec §9.2 half-step conversion; `RatingStars` now renders and calls it with optimistic update + rollback, spec §12.7/§12.11)
 - [x] Mutual exclusivity with Not Interested (service logic + DB `CheckConstraint`, spec §5.2)
 - [x] State removal (`DELETE` rating/not-interested, idempotent, spec §5.3)
 - [x] Full shelf management (create/rename/describe/delete, spec §5.4/§9.3)
@@ -555,7 +700,7 @@ on the basis of intent, only of a passing command.
 - [x] Not Interested may remain shelved (explicit integration test — spec §5.3/§12.7)
 - [x] Shelf feed allows books from other shelves (`GET /recommendations/shelves/{id}`, spec §5.5 — `shelf_exclusions` only excludes *this* shelf's books, not every shelf; integration-tested)
 - [x] Rated page (backend: `GET /me/ratings` — all 5 sorts, rating-range/genre filters, cursor pagination, fully tested; no rendered page yet — Phase 8)
-- [x] Similar books (`GET /recommendations/books/{id}/similar`, spec §5.5 — excludes source/rated/Not-Interested, saved books remain eligible)
+- [x] Similar books (`GET /recommendations/books/{id}/similar`, spec §5.5 — excludes source/rated/Not-Interested, saved books remain eligible; rendered on the detail page via the same `BookMasonryGrid` Home uses, single page rather than infinite-scrolled, risk #54)
 - [x] Cursor pages without duplicates (recommendation batches: `PK(request_id, position)` plus a defensive disjoint-pages integration test per surface, spec §9.9/ADR-0007)
 - [x] Fallback provider (spec §10.10's chain, contract-tested in `packages/recommender` and integration-tested at the apps/api boundary via a dependency-override 503 test)
 
@@ -579,12 +724,15 @@ on the basis of intent, only of a passing command.
 - [x] Lint/type/build success for everything created this pass, including `tests/integration` and `packages/recommender` (see §5d command log)
 - [x] No secrets committed (`.env` gitignored, only `.env.example` with fake values tracked)
 - [x] No stack traces exposed (shared exception handler returns the §9.8 envelope only)
-- [ ] Keyboard accessibility (what exists so far — auth forms, nav, avatar
-  menu — is keyboard accessible: native `<label>`/`<input>`/`<button>`
-  elements throughout, Radix's `DropdownMenu` provides focus trap/Escape/
-  arrow-key navigation for free; not checked off yet because the critical
-  controls this item is really about — rating stars, shelf-save overlay —
-  don't exist until Phase 7/8, and no automated a11y audit has run)
+- [x] Keyboard accessibility (auth forms, nav, avatar menu, and now the
+  critical controls this item was really waiting on: `RatingStars` — ten
+  native radio inputs sharing one `name`, so arrow-key navigation and
+  Space/click selection are a browser feature, not custom JS — the shelf
+  selector's native checkboxes, and Radix `Dialog`/`AlertDialog`/`Popover`
+  for the detail modal/confirm-dialog/shelf-picker, each providing focus
+  trap and Escape for free, spec §12.12. Caveat: no automated a11y audit
+  (e.g. axe) has run yet — Phase 9 — and Search/Shelves/Rated are still
+  placeholders with nothing to audit)
 - [x] Setup docs (this plan + root `README.md`)
 - [x] AWS mapping documented (ADR-0009, `README.md`)
 - [ ] Usable `docker compose up` flow (authored, **not runtime-verified** — Docker not installed locally)
@@ -849,6 +997,70 @@ rendering, click-through navigation, or visual appearance — no interactive
 browser tool is available in this environment (risk #44). Both dev servers
 were left running after this pass so the user can drive the real UI in a
 browser directly.
+
+## 5f. Phase 7 validation commands and results
+
+```bash
+# Backend: new covers route + its live-smoke-test-only path-resolution bug
+cd apps/api
+uv run ruff format --check . && uv run ruff check . && uv run mypy .
+uv run pytest tests/test_covers.py -v                 # 7 passed
+uv run pytest tests ../../tests/integration --cov=book_app --cov-report=term-missing -q   # 218 passed, 94%
+cd ../../packages/recommender && uv run ruff format --check . && uv run ruff check . && uv run mypy . && uv run pytest -q   # 38 passed, unaffected
+
+# Frontend: new deps, all new components/hooks/routes
+cd ../../apps/web
+npm install @radix-ui/react-dialog @radix-ui/react-alert-dialog @radix-ui/react-popover --legacy-peer-deps
+ls node_modules/@testing-library/       # verify --legacy-peer-deps didn't repeat Phase 6's regression
+npx tsc -b --force
+npm run lint
+npm run test        # 37 passed (12 files, was 15/7 after Phase 6)
+npm run build
+
+# Regenerate the API client against the updated backend schema (new /covers path)
+cd ../api && uv run python -m book_app.cli.export_openapi
+cd ../web && npm run generate-api-client
+
+# Live smoke test — real dev database, exact `make dev-api` launch convention
+# (this is what caught the cover-path bug: identical fixture-based unit
+# tests above passed cleanly first, since tmp_path is always absolute)
+cd ../api && uv run uvicorn book_app.main:app --port 8000 &     # cwd = apps/api, matching make dev-api
+cd ../web && npm run dev &
+
+curl -sc /tmp/c7 -X POST http://localhost:8000/api/v1/auth/register -H "Content-Type: application/json" \
+  -d '{"username":"phase7smoke","password":"correct horse battery staple","password_confirmation":"correct horse battery staple"}'
+curl -sc /tmp/c7 -b /tmp/c7 -X POST http://localhost:8000/api/v1/auth/login -H "Content-Type: application/json" \
+  -d '{"username":"phase7smoke","password":"correct horse battery staple"}'
+CSRF=$(grep csrf_token /tmp/c7 | awk '{print $NF}')
+
+curl -s -b /tmp/c7 "http://localhost:8000/api/v1/recommendations/home?limit=3"     # real books, real cover_object_keys
+curl -so /tmp/cover.jpg -w "%{http_code} %{content_type}\n" \
+  http://localhost:8000/api/v1/covers/<a cover_object_key from the response above>  # first attempt: 404 (the bug)
+                                                                                     # after the fix: 200 image/jpeg
+curl -s -b /tmp/c7 -X PUT http://localhost:8000/api/v1/books/1/rating -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $CSRF" -d '{"rating": 4.5}'
+curl -s -b /tmp/c7 http://localhost:8000/api/v1/books/1                            # user_state.rating reflects it
+SHELF_ID=$(curl -s -b /tmp/c7 -X POST http://localhost:8000/api/v1/shelves -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $CSRF" -d '{"name":"Phase 7 Smoke Shelf"}' | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+curl -s -b /tmp/c7 -X PUT "http://localhost:8000/api/v1/books/2/shelves" -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $CSRF" -d "{\"shelf_ids\": [\"$SHELF_ID\"]}"
+curl -s -b /tmp/c7 "http://localhost:8000/api/v1/recommendations/books/1/similar?limit=3"
+```
+
+Result: all green after the covers-path fix. Frontend: 37/37 tests, lint
+clean, typecheck clean, production build succeeds (~403 KB JS / 20 KB CSS
+pre-gzip). Backend: 218/218 tests (94% coverage, up from 211 — the 7 new
+`core/covers.py` tests), recommender unaffected at 38/38. Live smoke test
+walked the full register → login → home feed (real books/covers) → rate →
+detail reflects it → create shelf → sync a book onto it → similar books →
+cover-bytes-for-a-real-key cycle against the real 92,524-book dev database,
+**catching the cover path-resolution bug** in the process — the exact kind
+of gap unit tests with always-absolute `tmp_path` fixtures structurally
+cannot catch, and precisely why CLAUDE.md requires live validation, not
+just green test suites. Server logs stayed clean (structured JSON, no
+stack traces) throughout. As in Phase 6, no interactive browser tool is
+available in this environment (risk #44) — both dev servers were left
+running afterward for manual verification.
 
 ## 6. Risks and assumptions
 
@@ -1224,15 +1436,173 @@ conservative, reversible default and document it."
     page and became a real route rendering `ComingSoon`. Confirmed
     unreferenced anywhere else via grep before deleting, rather than left
     behind as dead code.
+46. **No backend route served cover image bytes before this phase**, even
+    though `LocalFileStorage` (Phase 2) and every relevant response schema
+    (`cover_object_key`) existed already — nothing before Phase 7 rendered
+    an `<img>` tag, so the gap was invisible until now. Spec §20 ("do not
+    construct cover paths in frontend") plus the Docker Compose "covers
+    read-only" mount into the API service (spec §16, present since Phase 1
+    but never acted on) both point at the same missing piece. Resolved by
+    adding `GET /api/v1/covers/{object_key}` (`core/covers.py`) — see
+    ADR-0011 for the full reasoning, including why it's deliberately the
+    one unauthenticated route in the app.
+47. **`cover_storage_local_path`'s bare relative default resolved against
+    the wrong directory** — a real bug, caught only by live-smoke-testing
+    against a dev server launched the documented way (`make dev-api`'s own
+    `cd apps/api &&`), not by the fixture-based unit tests in
+    `tests/test_covers.py` (`tmp_path` is always absolute, so those never
+    exercised the relative-path branch at all). Fixed with
+    `resolve_cover_storage_root()` in `core/covers.py`, anchoring at the
+    repo root via `Path(__file__).resolve().parents[5]` — the exact pattern
+    Phase 5's `modules/recommendations/artifact_paths.py` already
+    established for `artifact_storage_local_path` (same root cause,
+    documented in that file's own module docstring), and which Phase 2's
+    `import_catalog.py` and Phase 6's `export_openapi.py` each already use
+    independently for their own default paths. Deliberately **not**
+    refactored into one shared utility — four small, self-contained copies
+    of a two-line pattern is the established convention here already, and
+    consolidating it would be a bigger, riskier change than this bugfix
+    called for (CLAUDE.md: "three similar lines is better than a premature
+    abstraction"). Worth revisiting *only* if a fifth call site appears.
+48. **No book in the dataset has any usable "series" data to display
+    separately.** Investigated before building anything, having initially
+    planned to derive a series annotation by diffing `title` against
+    `title_without_series` (the schema provides both): queried the live
+    dev database directly and found `title <> title_without_series` for
+    **zero** of 92,524 rows — `title_without_series` is populated but
+    always identical to `title`, so it carries no information at all.
+    `series_data.source_series_ids` is real for 29,948 books (~32%) but is
+    genuinely opaque per `import_adapter.py`'s own docstring ("series gives
+    only opaque source series IDs, never names") — e.g.
+    `{"source_series_ids": ["179504", "1105605"]}`, unusable for display.
+    The good news: the raw `title` field already embeds series info in
+    human-readable form when present (e.g. "Stone of Farewell (Memory,
+    Sorrow, and Thorn, #2)"), a Goodreads convention confirmed directly
+    against real rows — so showing `title` as-is (which `BookDetailContent`
+    already does) satisfies spec §12.7's "series" bullet honestly, without
+    inventing a label for data that doesn't exist. Caught before writing
+    any dead string-parsing code, not after.
+49. **Card's Save/Saved button and the shelf-selector button are two
+    controls over one action, and spec §12.6 doesn't fully specify how
+    they relate** — it separately says "top-right Save/Saved" and
+    "remember last-used shelf during session" (the latter written as a
+    property of the shelf selector). Resolved as a Pinterest-informed
+    reading (ADR-0008's own naming: "Pinterest-inspired frontend"),
+    matching how Pinterest's own Save button behaves: unsaved + a
+    last-used shelf exists this session → "Save" instantly adds to it, no
+    picker; unsaved + no last-used shelf yet → opens the picker (nothing
+    to quick-save *to*); already saved → clicking "Saved" opens the picker
+    to review/edit rather than instantly unsaving everywhere. "Session" is
+    read as `sessionStorage` (`hooks/useLastUsedShelf.ts`) — cleared on tab
+    close, which is a closer literal match than plain in-memory state (lost
+    on every unmount) or `localStorage` (would outlive the session
+    entirely).
+50. **Home's shelf-lens row navigates to `/shelves/:id/discover` instead of
+    rendering shelf-scoped recommendations inline.** Spec §12.4 lists the
+    row as "For You + user shelves" under Home's own bullet list (Phase 7
+    scope), but that route's actual content — tabs, collage overview — is
+    explicitly Phase 8 scope (spec §18). Building shelf-scoped results
+    inline on Home now would mean either duplicating Phase 8's eventual UI
+    or building throwaway code; navigating to the (still-placeholder) route
+    keeps the lens row real and functional without jumping ahead of the
+    phase boundary. The route itself already exists and already resolves
+    correctly (Phase 6) — only its content is still `ComingSoon`.
+51. **Masonry uses round-robin column distribution, not CSS `columns` or a
+    shortest-column-fill algorithm.** Spec §12.4 explicitly requires
+    "stable rendered order," which native CSS multi-column layout can't
+    guarantee under infinite scroll — appending items rebalances the
+    *entire* column set, potentially moving already-rendered items to
+    different columns. A shortest-column-fill algorithm (used by e.g.
+    Pinterest's real masonry) avoids that but needs real image height
+    measurement to decide placement, which needs either `ResizeObserver`
+    wiring per card or waiting for image load events. Round-robin
+    (`item index % columnCount`) makes every item's column assignment a
+    pure function of its own index, so appending items at the end can
+    never change where earlier items sit, and needs no height measurement
+    at all — a deliberate simplicity-for-a-small-visual-cost trade,
+    reversible later if true shortest-column balancing turns out to matter
+    more than this phase judged.
+52. **Grid column-count breakpoints are concrete pixel values picked from
+    spec §12.5's given ranges**, not exact numbers the spec states: "wide
+    desktop 7-8" → 8 at ≥1536px, "desktop 5-6" → 6 at ≥1024px, "tablet 3-4"
+    → 4 at ≥768px, "mobile 2" → 2 at ≥480px, "narrow 1-2" → 1 below that.
+    Pixel breakpoints match Tailwind's default `md`/`lg`/`2xl` so the grid
+    agrees with every other responsive class already in the app
+    (`hooks/useColumnCount.ts`).
+53. **"New user" guidance banner heuristic is "has zero shelves," not a
+    dedicated new-account check** — spec §12.4 asks for a "subtle guidance
+    message" for new users without defining "new." Fetching `/me/ratings`
+    just to check for a truly new account would add a request Home doesn't
+    otherwise need; shelf count is already being fetched for the lens row
+    (spec §12.4's own other bullet), so reusing it is free. Also
+    dismissible and `localStorage`-persisted once dismissed — "no forced
+    onboarding" (spec §12.4) means it must never block the feed or return
+    uninvited once closed.
+54. **The detail page's similar-books section fetches a single page (no
+    infinite scroll)**, unlike Home's feed. Spec §12.5's masonry/infinite-
+    scroll requirements read as being about the primary feed surfaces
+    (Home, Search, Shelf feeds), not necessarily an in-modal secondary
+    section; a detail view already has a lot happening on screen, and a
+    fixed `limit=12` similar-books grid is enough to prove the surface
+    works end to end without adding a second `IntersectionObserver`
+    inside what may itself be a scrolling `Dialog`. Reversible if it turns
+    out to matter — the same `BookMasonryGrid` component would work with
+    `useInfiniteQuery` in place of `useQuery` with no changes to the
+    component itself.
+55. **Home's infinite query never sends the `exclude` param the backend
+    already supports** (spec §5.5 "already returned in the current feed
+    session," `recommendations/api.py::_parse_exclude`, added Phase 5).
+    Not needed for *continuous* scrolling in one visit — the persisted
+    batch (ADR-0007) already guarantees no duplicates across pages of the
+    *same* `useInfiniteQuery` cache entry — only for a genuinely *new*
+    top-level request within one session (e.g. the cache entry got garbage
+    collected after 5 minutes of inactivity, TanStack Query's default
+    `gcTime`). Tracking every book_id ever rendered across cache
+    lifetimes would need its own session-scoped store for a narrow edge
+    case; left unbuilt this phase, flagged here rather than silently
+    decided.
+56. **jsdom implements neither `IntersectionObserver` nor a working
+    `localStorage`/`sessionStorage`, found by running the new tests, not
+    anticipated in advance.** `IntersectionObserver` is simply absent
+    (`typeof window.IntersectionObserver === 'undefined'` on a fresh jsdom
+    Window, verified directly) — `Home`'s infinite-scroll effect threw the
+    moment it mounted in any test until stubbed. `localStorage` is a
+    stranger bug: Node 26 added its own native, experimental
+    `globalThis.localStorage`, which throws ("...not available because
+    --localstorage-file was not provided") the instant anything touches
+    it, and it shadows jsdom's own per-window implementation (verified
+    working in isolation via a standalone `jsdom.JSDOM()` construction) —
+    an environment/tooling interaction specific to this Node version, not
+    a jsdom bug per se. Both stubbed with small deterministic
+    implementations in `src/test/setup.ts` (`IntersectionObserver`'s
+    `observe` is a no-op — the actual "sentinel became visible" trigger is
+    Playwright's job in Phase 9, not simulated here) so tests don't depend
+    on either jsdom's feature coverage or the Node version running them.
+57. **Scroll restoration is hand-rolled (`sessionStorage`, keyed by a
+    caller-supplied id), not React Router's built-in `<ScrollRestoration>`**
+    — that component only exists for the data-router API
+    (`createBrowserRouter`/`RouterProvider`), and this app uses declarative
+    `<BrowserRouter>` specifically because the book-detail modal-route
+    pattern (spec §12.7) needs the background page to stay mounted
+    underneath the `Dialog`, which is simpler to express declaratively.
+    Only matters for a genuine unmount/remount of Home (e.g. navigating to
+    Shelves and back via the rail) — opening a book as a modal never
+    unmounts Home at all, so that path already preserves scroll position
+    for free.
 
 ## 7. Next phase
 
-**Phase 7 — Core frontend.** Masonry grid; book cards with a shelf-selector
-save overlay; the real Home feed wired to `GET /recommendations/home`
-(replacing this phase's `ComingSoon`); book detail modal/route wired to
-`GET /books/{id}` and `GET /recommendations/books/{id}/similar`; rating
-control (half-star, spec §5.1) and Not-Interested control, both with
-optimistic updates and rollback on failure. First phase where the frontend
-talks to the recommendation/book endpoints Phases 4-5 already built and
-tested — no new backend work expected, but do not start without explicit
+**Phase 8 — Shelves/Rated/Search.** Shelf overview with board-like cover
+collages (name, count, updated order); create/rename/edit-description/
+delete; shelf detail's Books/Discover tabs (Discover reusing this phase's
+`BookMasonryGrid`/`BookCard` against `GET /recommendations/shelves/{id}`,
+already built and tested since Phase 5); the Rated page (backend already
+complete since Phase 4 — all 5 sorts, rating-range/genre filters, cursor
+pagination) with its sort/filter controls; Search (`GET /search/books` is
+**not built yet** — not in any phase's own spec §18 bullet list before this
+one either, so this is also the first phase that needs new backend work)
+with debounced suggestions, URL-encoded query state, and state badges on
+results (ratable/saved/Not-Interested — the first surface where a book can
+legitimately arrive already in one of those states, unlike Home). All
+loading/empty/error states throughout. Do not start without explicit
 instruction.

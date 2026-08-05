@@ -15,6 +15,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from book_app.core.config import Settings, get_settings
+from book_app.core.covers import resolve_cover_storage_root
+from book_app.core.covers import router as covers_router
 from book_app.core.database import create_db_engine, create_session_factory
 from book_app.core.exceptions import register_exception_handlers
 from book_app.core.health import router as health_router
@@ -26,6 +28,7 @@ from book_app.modules.books.api import router as books_router
 from book_app.modules.interactions.api import router as interactions_router
 from book_app.modules.recommendations.api import router as recommendations_router
 from book_app.modules.shelves.api import router as shelves_router
+from book_app.shared.storage.local import LocalFileStorage
 
 API_PREFIX = "/api/v1"
 
@@ -50,12 +53,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
     app.state.auth_rate_limiter = build_auth_rate_limiter(resolved_settings)
+    # Local only — see core/covers.py's module docstring for the S3/CloudFront
+    # swap plan (spec §17) once a non-local `cover_storage_backend` exists.
+    app.state.cover_storage = LocalFileStorage(
+        resolve_cover_storage_root(resolved_settings.cover_storage_local_path)
+    )
 
     configure_cors(app, resolved_settings)
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
 
     app.include_router(health_router, prefix=API_PREFIX)
+    app.include_router(covers_router, prefix=API_PREFIX)
     app.include_router(auth_router, prefix=API_PREFIX)
     app.include_router(books_router, prefix=API_PREFIX)
     app.include_router(shelves_router, prefix=API_PREFIX)

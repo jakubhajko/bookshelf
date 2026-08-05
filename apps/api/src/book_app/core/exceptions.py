@@ -51,6 +51,12 @@ class ServiceUnavailableError(AppError):
     message = "The service is temporarily unavailable."
 
 
+class CoverNotFoundError(AppError):
+    code = "COVER_NOT_FOUND"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "The requested cover image does not exist."
+
+
 def _request_id(request: Request) -> str:
     return str(getattr(request.state, "request_id", "unknown"))
 
