@@ -16,9 +16,10 @@ Two-pass design, driven by the CLI:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import delete, func, insert
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -256,3 +257,36 @@ def replace_book_similarities_batch(
     session.execute(delete(BookSourceSimilarity).where(BookSourceSimilarity.book_id.in_(book_ids)))
     if rows:
         session.execute(insert(BookSourceSimilarity), rows)
+
+
+# --- Read-side queries (Phase 4: book detail) -------------------------------
+
+
+def get_by_id(session: Session, book_id: int) -> Book | None:
+    return session.get(Book, book_id)
+
+
+@dataclass(frozen=True)
+class AuthorRef:
+    name: str
+    role: str | None
+
+
+def get_authors_for_book(session: Session, book_id: int) -> list[AuthorRef]:
+    stmt = (
+        select(Author.name, BookAuthor.role)
+        .join(BookAuthor, BookAuthor.author_id == Author.id)
+        .where(BookAuthor.book_id == book_id)
+        .order_by(BookAuthor.position)
+    )
+    return [AuthorRef(name=row.name, role=row.role) for row in session.execute(stmt)]
+
+
+def get_genre_names_for_book(session: Session, book_id: int) -> list[str]:
+    stmt = (
+        select(Genre.name)
+        .join(BookGenre, BookGenre.genre_id == Genre.id)
+        .where(BookGenre.book_id == book_id)
+        .order_by(BookGenre.position)
+    )
+    return [row.name for row in session.execute(stmt)]

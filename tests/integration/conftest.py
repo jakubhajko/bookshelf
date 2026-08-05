@@ -12,7 +12,9 @@ from __future__ import annotations
 import os
 import subprocess
 from collections.abc import Callable, Iterator
+from functools import partial
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from book_app.core.config import Settings
@@ -95,7 +97,8 @@ def _clean_all_tables(test_engine: Engine) -> None:
     with test_engine.begin() as conn:
         conn.execute(
             text(
-                "TRUNCATE TABLE auth_sessions, users, "
+                "TRUNCATE TABLE auth_sessions, shelf_books, shelves, user_book_states, "
+                "interaction_events, users, "
                 "book_source_similarities, book_catalog_shelf_tags, "
                 "book_genres, book_authors, catalog_shelf_tags, genres, authors, books "
                 "RESTART IDENTITY CASCADE"
@@ -114,3 +117,39 @@ def client(test_settings: Settings) -> Iterator[TestClient]:
     app = create_app(settings=test_settings)
     with TestClient(app) as test_client:
         yield test_client
+
+
+def _insert_book(
+    engine: Engine,
+    *,
+    title: str = "Test Book",
+    work_id: str | None = None,
+    primary_author_name: str | None = "Test Author",
+    catalog_status: str = "ACTIVE",
+    cover_object_key: str | None = None,
+) -> int:
+    with engine.begin() as conn:
+        book_id: int = conn.execute(
+            text(
+                "INSERT INTO books "
+                "(work_id, title, primary_author_name, catalog_status, cover_object_key) "
+                "VALUES (:work_id, :title, :author, :status, :cover_object_key) RETURNING id"
+            ),
+            {
+                "work_id": work_id or f"test-work-{uuid4()}",
+                "title": title,
+                "author": primary_author_name,
+                "status": catalog_status,
+                "cover_object_key": cover_object_key,
+            },
+        ).scalar_one()
+    return book_id
+
+
+@pytest.fixture
+def insert_book(test_engine: Engine) -> Callable[..., int]:
+    """Inserts a minimal-but-valid ``books`` row for tests that need a real
+    book_id without running the full import pipeline; returns its id.
+    Exposes the module-level helper as a fixture so tests don't
+    cross-import test files — same reasoning as ``run_alembic`` above."""
+    return partial(_insert_book, test_engine)

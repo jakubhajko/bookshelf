@@ -86,16 +86,20 @@ exit 0 rather than fail — see `docs/implementation/plan.md` §6.
 
 ## Current status
 
-Phases 0-3 are complete: monorepo foundations, the full catalog data layer
+Phases 0-4 are complete: monorepo foundations, the full catalog data layer
 (92,526 books imported, search indexes proven against a live fuzzy query),
-and authentication — register/login/refresh/logout/me/change-password
-(spec §9.1), Argon2id passwords, HttpOnly cookie sessions with DB-backed
-revocable refresh sessions, session-bound CSRF, and a pluggable per-IP/
-per-username login rate limiter. 97 tests (69 unit + 28 integration against
-real PostgreSQL). Shelves, ratings, book detail, recommendations, and all
+authentication — register/login/refresh/logout/me/change-password (spec
+§9.1), Argon2id passwords, HttpOnly cookie sessions with DB-backed revocable
+refresh sessions, session-bound CSRF, and a pluggable per-IP/per-username
+login rate limiter — and books/state/shelves: book detail (`GET
+/books/{id}`), half-star ratings and Not Interested with the full spec
+§5.2-§5.3 state machine and append-only event log, shelves CRUD with
+atomic multi-shelf sync, and `/me/ratings` (all 5 sorts, rating-range/genre
+filters, cursor pagination). 175 tests (102 unit + 73 integration against
+real PostgreSQL), 94% combined coverage. Recommendations, search, and all
 product UI don't exist yet — see the phase-by-phase plan and acceptance
 checklist in [`docs/implementation/plan.md`](docs/implementation/plan.md)
-for exactly what's done versus what Phase 4 onward adds.
+for exactly what's done versus what Phase 5 onward adds.
 
 ## AWS design
 

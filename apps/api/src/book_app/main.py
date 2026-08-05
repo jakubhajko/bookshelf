@@ -22,6 +22,9 @@ from book_app.core.logging import configure_logging, get_logger
 from book_app.core.middleware import RequestContextMiddleware, configure_cors
 from book_app.modules.auth.api import router as auth_router
 from book_app.modules.auth.dependencies import build_auth_rate_limiter
+from book_app.modules.books.api import router as books_router
+from book_app.modules.interactions.api import router as interactions_router
+from book_app.modules.shelves.api import router as shelves_router
 
 API_PREFIX = "/api/v1"
 
@@ -53,6 +56,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health_router, prefix=API_PREFIX)
     app.include_router(auth_router, prefix=API_PREFIX)
+    app.include_router(books_router, prefix=API_PREFIX)
+    app.include_router(shelves_router, prefix=API_PREFIX)
+    app.include_router(interactions_router, prefix=API_PREFIX)
 
     return app
 
