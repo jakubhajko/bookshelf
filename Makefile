@@ -110,4 +110,5 @@ e2e: ## Run Playwright critical-flow tests
 	@echo "Not implemented yet - lands in Phase 9 (see docs/implementation/plan.md)."
 
 generate-api-client: ## Generate the frontend API client from the FastAPI OpenAPI schema
-	@echo "Not implemented yet - lands in Phase 6 (see docs/implementation/plan.md)."
+	cd apps/api && uv run python -m book_app.cli.export_openapi
+	cd apps/web && npm run generate-api-client

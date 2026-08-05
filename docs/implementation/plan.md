@@ -442,11 +442,78 @@ Phases mirror spec §18 exactly. Status is updated as work lands.
   activate a *non-latest* model version; the frontend never renders any of
   this yet (Phase 6+).
 
-### Phase 6 — Frontend shell/auth — not started
+### Phase 6 — Frontend shell/auth — **done, this pass**
 
-Dark design system/tokens, shell + left rail + top bar, search bar,
-register/login pages, `AuthProvider` + current-user bootstrap, generated API
-client from the FastAPI OpenAPI schema (`make generate-api-client`).
+- **Generated API client pipeline**: new backend CLI `book_app.cli.export_openapi`
+  (`apps/api/src/book_app/cli/export_openapi.py`) exports `app.openapi()` to
+  `apps/web/openapi.json` without needing a live database (verified:
+  `create_app()` + `.openapi()` alone never touches Postgres) — 2 new unit
+  tests. `openapi-typescript` turns that into
+  `apps/web/src/api/generated/schema.d.ts` (gitignored, regenerated on
+  demand). `make generate-api-client` now runs both steps in sequence.
+  `openapi-fetch` provides the typed runtime client on top of the generated
+  types — verified 20 real routes exported end to end against the live
+  backend schema.
+- **Design tokens** (`apps/web/src/index.css`): full Tailwind v4 `@theme`
+  block (background/surface/surface-hover/border/text/text-muted/accent/
+  accent-hover/accent-text/sidebar/topbar colors, radii) — CSS-first config
+  per ADR-0008, not a JS `tailwind.config`. `prefers-reduced-motion` handled
+  at the base layer (spec §12.12).
+- **API client wrapper** (`apps/web/src/api/client.ts`): `apiClient`
+  (openapi-fetch instance) with two middlewares — CSRF header injection from
+  the readable `csrf_token` cookie, and transparent single-flight
+  session-refresh-and-retry on a 401 (request cloning via openapi-fetch's
+  per-request `id`, since a `Request` body can only be read once). `unwrap()`
+  turns the `{data,error}` discriminated union into throw-on-error;
+  `ApiError` carries status/message/code. `api/auth.ts` — typed
+  `register`/`login`/`fetchCurrentUser` (401 → `null`, not a thrown
+  error)/`logout`/`changePassword`. `api/queryKeys.ts` centralizes TanStack
+  Query keys per spec §12.11.
+- **Auth subsystem** (`apps/web/src/auth/`): `AuthContext`/`useAuth` split
+  from `AuthProvider` (Fast Refresh compliance, oxlint's
+  `react/only-export-components`); `AuthProvider` bootstraps via one
+  `useQuery` (`staleTime: Infinity`, `retry: false`) and updates the cache
+  directly on login/logout rather than refetching; `RequireAuth`/`GuestOnly`
+  layout-route guards (`<Outlet/>`/`<Navigate/>`, remembering `location` as
+  `state.from` so a successful login returns the visitor where they were
+  headed).
+- **Shell** (`apps/web/src/shell/`): `LeftRail` (desktop) / `BottomNav`
+  (mobile) share one `navItems` source of truth (Home/Shelves/Rated,
+  `lucide-react` icons); `TopBar` (search form + `AvatarMenu`); `AvatarMenu`
+  built on Radix `DropdownMenu` (ADR-0008: accessible headless primitives
+  over hand-rolled widgets) — username, Account, Change password, Logout.
+- **Pages**: `Register`/`Login` (controlled forms via a shared `TextField`,
+  server error shown via `role="alert"`); `Account` (real page — username +
+  change-password form, not a placeholder, since `AvatarMenu` needed
+  somewhere to navigate and `changePassword` already existed from Phase 3);
+  `Search`/`BookDetail`/`Shelves`/`ShelfBooks`/`ShelfDiscover`/`Rated`/
+  `NotFound` — placeholders (`ComingSoon`) reading their real route
+  params/search params, real content lands in Phase 7/8. `App.tsx` wires
+  every spec §12.3 route through `GuestOnly`/`RequireAuth`/`AppShell` as
+  appropriate.
+- **Tests**: 15 tests across 7 files (was 2, Phase 1's health-check smoke
+  test) — `AuthProvider` (bootstrap-authenticated, bootstrap-anonymous,
+  clears-on-logout), `Register`/`Login` (success navigation + server-error
+  display), `RequireAuth`/`GuestOnly` (redirect behavior both directions,
+  including that `RequireAuth` preserves the origin path in redirect
+  state), `AvatarMenu` (username render, menu opens, logout calls the API
+  and navigates — spec §13.4's explicit "logout" coverage requirement).
+- **Live smoke-tested** at the HTTP level against the real backend (no
+  interactive browser tool available in this environment — see risk #44):
+  booted both dev servers (`make dev-api` against the project-local
+  Postgres cluster on :5434, `npm run dev`), then drove the exact register
+  → login → `/me` → logout → `/me` cycle with `curl` and a cookie jar,
+  confirming cookie flags (`access_token`/`refresh_token` HttpOnly,
+  `csrf_token` readable), CSRF enforcement (logout without `X-CSRF-Token` →
+  403, with it → 204), and post-logout 401 — the same contract `client.ts`'s
+  middleware is written against. CORS confirmed exact-origin
+  (`http://localhost:5173`, credentialed). Server logs stayed clean
+  (structured JSON, no stack traces) throughout.
+- **Not built**: the real content behind
+  Search/BookDetail/Shelves/ShelfBooks/ShelfDiscover/Rated (Phase 7/8); any
+  interactive-browser/DOM verification (no such tool in this environment —
+  mitigated by the HTTP-level smoke test above plus a clean production
+  build).
 
 ### Phase 7 — Core frontend — not started
 
@@ -478,7 +545,7 @@ on the basis of intent, only of a passing command.
 - [x] Parquet catalog import (`make import-data`; full 92,526-row catalog imported and verified — see Phase 2)
 - [x] Local covers (`LocalFileStorage` + safe path resolution, spec §7.3 — storage-layer concern only; spec §9 lists no cover-serving HTTP route, so there's nothing further for the API to add here. Correcting this plan's own Phase 2/3-era note, which incorrectly expected one in Phase 4)
 - [x] Home feed through provider (`GET /recommendations/home`, spec §9.5 — mock and popularity providers both live-tested)
-- [ ] Title/author search (not built — not in Phase 5's own spec §18 bullet list either)
+- [ ] Title/author search (backend not built — not in Phase 5's own spec §18 bullet list either; the frontend search bar exists and navigates to `/search?q=...`, but that route itself is still a Phase 7/8 `ComingSoon` placeholder)
 - [x] Book detail (`GET /books/{id}` — spec §12.7's fields minus the similar-books grid, which is this phase's `GET /recommendations/books/{id}/similar`, now also live)
 - [x] Half-star ratings (`PUT/DELETE /books/{id}/rating`, spec §9.2 half-step conversion)
 - [x] Mutual exclusivity with Not Interested (service logic + DB `CheckConstraint`, spec §5.2)
@@ -512,7 +579,12 @@ on the basis of intent, only of a passing command.
 - [x] Lint/type/build success for everything created this pass, including `tests/integration` and `packages/recommender` (see §5d command log)
 - [x] No secrets committed (`.env` gitignored, only `.env.example` with fake values tracked)
 - [x] No stack traces exposed (shared exception handler returns the §9.8 envelope only)
-- [ ] Keyboard accessibility (no interactive UI yet beyond a smoke page)
+- [ ] Keyboard accessibility (what exists so far — auth forms, nav, avatar
+  menu — is keyboard accessible: native `<label>`/`<input>`/`<button>`
+  elements throughout, Radix's `DropdownMenu` provides focus trap/Escape/
+  arrow-key navigation for free; not checked off yet because the critical
+  controls this item is really about — rating stars, shelf-save overlay —
+  don't exist until Phase 7/8, and no automated a11y audit has run)
 - [x] Setup docs (this plan + root `README.md`)
 - [x] AWS mapping documented (ADR-0009, `README.md`)
 - [ ] Usable `docker compose up` flow (authored, **not runtime-verified** — Docker not installed locally)
@@ -712,6 +784,71 @@ under both `mock` and `popularity` provider configurations, including that
 the popularity-provider response's `model_version` matched the artifact
 `build-popularity` had just produced and its top-ranked books were
 plausible (classics with large, consistently-high rating support).
+
+## 5e. Phase 6 validation commands and results
+
+```bash
+# Generated API client (backend must be import-able, no live DB required)
+cd apps/api
+uv run python -m book_app.cli.export_openapi     # writes apps/web/openapi.json
+cd ../../apps/web
+npm run generate-api-client                      # writes src/api/generated/schema.d.ts
+# or: make generate-api-client, from the repo root
+
+# Frontend lint/types/tests/build
+npm run lint
+npx tsc -b --force
+npm run test          # 15 passed (7 files)
+npm run build          # tsc -b && vite build — succeeds, ~368 KB JS / 15 KB CSS pre-gzip
+
+# Backend unaffected this phase — re-verified anyway
+cd ../../apps/api
+uv run ruff format --check . && uv run ruff check . && uv run mypy .
+uv run pytest -q
+cd ../../packages/recommender && uv run ruff format --check . && uv run ruff check . && uv run mypy . && uv run pytest -q
+
+# Live smoke test — no interactive browser tool available in this
+# environment (see risk #44), so this drives the real HTTP contract
+# apps/web/src/api/client.ts is written against, with a cookie jar standing
+# in for the browser's cookie store
+make db-start
+cd apps/api && uv run uvicorn book_app.main:app --port 8000 &     # real Postgres :5434
+cd ../apps/web && npm run dev &                                  # :5173, CORS-allowed origin
+curl -sf http://localhost:5173/ >/dev/null                        # index.html serves
+curl -sf http://localhost:8000/api/v1/health/ready                # {"status":"ok","database":"ok"}
+
+curl -sc /tmp/c6 -X POST http://localhost:8000/api/v1/auth/register \
+  -H "Origin: http://localhost:5173" -H "Content-Type: application/json" \
+  -d '{"username":"smoketest_kubo","password":"correct horse battery staple","password_confirmation":"correct horse battery staple"}'
+# 201, no Set-Cookie — register alone does not start a session (AuthProvider's
+# register() is a pure pass-through, confirmed against real backend behavior)
+
+curl -sc /tmp/c6 -X POST http://localhost:8000/api/v1/auth/login \
+  -H "Origin: http://localhost:5173" -H "Content-Type: application/json" \
+  -d '{"username":"smoketest_kubo","password":"correct horse battery staple"}'
+# 200, Set-Cookie: access_token (HttpOnly, 900s), refresh_token (HttpOnly,
+# path=/api/v1/auth, 2592000s), csrf_token (readable, 2592000s)
+
+curl -s -b /tmp/c6 http://localhost:8000/api/v1/auth/me            # 200, user
+curl -si -b /tmp/c6 -X POST http://localhost:8000/api/v1/auth/logout \
+  -H "Origin: http://localhost:5173"                                # 403 (no X-CSRF-Token)
+CSRF=$(grep csrf_token /tmp/c6 | awk '{print $NF}')
+curl -si -b /tmp/c6 -X POST http://localhost:8000/api/v1/auth/logout \
+  -H "Origin: http://localhost:5173" -H "X-CSRF-Token: $CSRF"       # 204, clears all 3 cookies
+curl -si -b /tmp/c6 http://localhost:8000/api/v1/auth/me            # 401
+```
+
+Result: all green. Frontend: 15/15 tests, lint clean, typecheck clean,
+production build succeeds. Backend: unchanged and re-verified green (247
+tests, same as Phase 5). Live smoke test confirmed the full
+register → login → me → logout → me cycle behaves exactly as
+`apps/web/src/api/client.ts` and `api/auth.ts` assume, including CSRF
+enforcement and cookie flags; backend access logs stayed structured JSON
+throughout, no stack traces or secrets. **Not verified**: actual DOM
+rendering, click-through navigation, or visual appearance — no interactive
+browser tool is available in this environment (risk #44). Both dev servers
+were left running after this pass so the user can drive the real UI in a
+browser directly.
 
 ## 6. Risks and assumptions
 
@@ -1036,13 +1173,66 @@ conservative, reversible default and document it."
     rating count, which likely mixes in weaker implicit signals. A design
     choice, not a double-counting bug — flagged here so it reads as one on
     a future re-read of the formula.
+41. **`npm install --legacy-peer-deps` silently skipped installing
+    `@testing-library/react`'s own peer dependency, `@testing-library/dom`**
+    — npm 7+'s `--legacy-peer-deps` flag disables automatic peer-dependency
+    resolution entirely, not just conflict resolution for the one package it
+    was invoked for. Broke the pre-existing `Home.test.tsx` (TypeScript
+    errors: `screen`/`waitFor` "not exported", since
+    `@testing-library/react`'s types re-export from `@testing-library/dom`).
+    A clean `rm -rf node_modules && npm install --legacy-peer-deps`
+    reproduced the same gap, confirming it was the flag's real behavior, not
+    corruption. Fixed by adding `@testing-library/dom` as an explicit direct
+    devDependency. Worth remembering for any future `--legacy-peer-deps`
+    install in this repo: verify the full dependency tree afterward, don't
+    assume only the targeted conflict was affected.
+42. **`openapi-typescript@7.13.0` declares a peer dependency on
+    `typescript@^5.x`**; this repo runs `~6.0.2`. Installed anyway via
+    `--legacy-peer-deps`, reasoned as a peer-range declaration lag rather
+    than a real incompatibility — the tool only parses OpenAPI JSON and
+    emits `.d.ts` text, it doesn't hook into TypeScript's compiler
+    internals. Confirmed safe in practice: `npx tsc -b --force` on the
+    generated output is clean. Reversible if a future `openapi-typescript`
+    release actually needs TS6-specific behavior it doesn't have yet.
+43. **`Account` was built as a real page this phase, not a `ComingSoon`
+    placeholder**, unlike every other Phase 7/8 route. `AvatarMenu`'s
+    "Account" and "Change password" items need somewhere real to navigate,
+    and `changePassword` already existed as a working endpoint since Phase
+    3 — building a placeholder here and a real page later would mean
+    throwing away and rewriting the menu's wiring for no reason. Scoped
+    narrowly: username display + one change-password form, nothing from
+    Phase 7/8's own feature list.
+44. **No interactive browser tool is available in this environment** — only
+    `WebFetch` (a read-only AI-summarizer), no browser automation. Per
+    CLAUDE.md's instruction to state this plainly rather than claim
+    success: the actual rendered DOM, click-through navigation
+    (register→login→shell→logout), CSS appearance, and responsive/mobile
+    layout were **not** verified visually or interactively this phase.
+    Mitigated as far as possible without one: a clean production build
+    (`vite build`), 15 passing component/integration tests using React
+    Testing Library + jsdom (which does exercise real render output and
+    simulated user events, just not a real browser engine or real CSS
+    layout), and an HTTP-level smoke test of the full auth cycle against
+    the live backend (§5e) proving the network contract the UI depends on
+    is correct. Both dev servers were left running after this pass
+    specifically so the user can do their own click-through if they want
+    to close this gap. Genuine residual risk: any bug that only manifests
+    in real browser rendering/layout/CSS (not covered by jsdom) would not
+    have been caught.
+45. **`apps/web/src/api/health.ts` (Phase 1's health-check API wrapper) was
+    deleted, not kept**, once `Home.tsx` stopped being a health-check smoke
+    page and became a real route rendering `ComingSoon`. Confirmed
+    unreferenced anywhere else via grep before deleting, rather than left
+    behind as dead code.
 
 ## 7. Next phase
 
-**Phase 6 — Frontend shell/auth.** Dark design system/tokens; shell +
-navigation (left rail + top bar); search bar (UI only — no backend search
-exists yet, spec §18 doesn't ask for it until later); register/login pages;
-`AuthProvider` + current-user bootstrap; a generated API client from the
-FastAPI OpenAPI schema (`make generate-api-client`). First frontend phase —
-everything built so far (Phases 1-5) has been backend-only. Do not start
-without explicit instruction.
+**Phase 7 — Core frontend.** Masonry grid; book cards with a shelf-selector
+save overlay; the real Home feed wired to `GET /recommendations/home`
+(replacing this phase's `ComingSoon`); book detail modal/route wired to
+`GET /books/{id}` and `GET /recommendations/books/{id}/similar`; rating
+control (half-star, spec §5.1) and Not-Interested control, both with
+optimistic updates and rollback on failure. First phase where the frontend
+talks to the recommendation/book endpoints Phases 4-5 already built and
+tested — no new backend work expected, but do not start without explicit
+instruction.

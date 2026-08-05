@@ -38,6 +38,10 @@ apps/web/playwright-report/
 apps/web/test-results/
 *.tsbuildinfo
 
+# Generated API client (Phase 6+) — regeneratable via `make generate-api-client`:
+apps/web/openapi.json
+apps/web/src/api/generated/
+
 # --- Env / secrets ---
 .env
 .env.local

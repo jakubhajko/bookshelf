@@ -1,7 +1,56 @@
 @import 'tailwindcss';
 
 /*
- * Design tokens (background, surface, text, border, accent, radii, sidebar,
- * top bar) land in Phase 6 with the dark design system (ADR-0008). This file
- * intentionally stays minimal until then.
+ * Design tokens (spec §12.1, ADR-0008): background, surface, text, border,
+ * accent, radii, sidebar, top bar. Dark-only for version one, but every
+ * surface is built from these tokens (not ad hoc colors) so a future light
+ * theme is a values swap here, not a per-component rewrite.
+ *
+ * Tailwind v4 generates utilities directly from these custom properties —
+ * `--color-surface` becomes `bg-surface`/`text-surface`/`border-surface`,
+ * `--radius-lg` becomes `rounded-lg`, etc.
  */
+@theme {
+  --color-background: #0a0a0b;
+  --color-surface: #18181b;
+  --color-surface-hover: #232327;
+  --color-border: #2e2e33;
+
+  --color-text: #f4f4f5;
+  --color-text-muted: #a1a1aa;
+
+  --color-accent: #e11d48;
+  --color-accent-hover: #f43f5e;
+  --color-accent-text: #ffffff;
+
+  --color-sidebar: #111113;
+  --color-topbar: #111113;
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 1rem;
+  --radius-full: 9999px;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-text);
+  }
+
+  /* Spec §12.12: reduced motion. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
