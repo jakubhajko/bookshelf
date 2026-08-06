@@ -17,8 +17,8 @@ from datetime import UTC, datetime
 from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
-from book_app.core.config import Settings, get_settings
-from book_app.core.dependencies import get_db
+from book_app.core.config import Settings
+from book_app.core.dependencies import get_db, get_request_settings
 from book_app.core.security import AccessTokenClaims, InvalidAccessTokenError, decode_access_token
 from book_app.core.security import hash_opaque_token as _hash_opaque_token
 from book_app.modules.auth import repository as session_repository
@@ -36,7 +36,7 @@ from book_app.shared.rate_limit import InMemoryFixedWindowRateLimiter, RateLimit
 
 
 def get_access_token_claims(
-    request: Request, settings: Settings = Depends(get_settings)
+    request: Request, settings: Settings = Depends(get_request_settings)
 ) -> AccessTokenClaims:
     token = request.cookies.get(ACCESS_TOKEN_COOKIE)
     if not token:

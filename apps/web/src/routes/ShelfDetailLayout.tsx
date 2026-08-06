@@ -8,6 +8,7 @@ import { queryKeys } from '../api/queryKeys'
 import * as shelvesApi from '../api/shelves'
 import type { Shelf } from '../api/shelves'
 import { TextField } from '../components/TextField'
+import { showToast } from '../toast/toastStore'
 import { NotFoundPage } from './NotFound'
 
 const TAB_CLASS = ({ isActive }: { isActive: boolean }) =>
@@ -97,8 +98,14 @@ function DeleteShelfButton({ shelf }: { shelf: Shelf }) {
       queryClient.setQueryData<Shelf[]>(queryKeys.shelves.list, (current) =>
         current?.filter((s) => s.id !== shelf.id),
       )
+      showToast(`Deleted "${shelf.name}".`, 'success')
       void navigate('/shelves', { replace: true })
     },
+    // Unlike rename (which has an inline `role="alert"` in EditShelfForm),
+    // nothing else here would tell the visitor a failed delete didn't
+    // happen — the confirmation dialog just closes either way.
+    onError: (err) =>
+      showToast(err instanceof ApiError ? err.message : 'Could not delete shelf.', 'error'),
   })
 
   return (

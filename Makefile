@@ -12,7 +12,7 @@ LOCAL_PGHOST := localhost
         test lint typecheck e2e generate-api-client
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
 ## --- Setup & local processes -----------------------------------------------
@@ -79,7 +79,7 @@ cleanup-sessions: ## Delete expired/revoked auth sessions
 	cd apps/api && uv run python -m book_app.cli.cleanup_sessions
 
 seed-demo: ## Create the local demo user with representative shelves/ratings/saves
-	@echo "Not implemented yet - lands in Phase 4+ (see docs/implementation/plan.md)."
+	cd apps/api && uv run python -m book_app.cli.seed_demo
 
 build-popularity: ## Build the popularity recommendation artifact
 	cd apps/api && uv run python -m book_app.cli.build_popularity
@@ -106,8 +106,10 @@ typecheck: ## Run backend and frontend type checkers
 	cd packages/recommender && uv run mypy .
 	cd apps/web && npm run typecheck
 
-e2e: ## Run Playwright critical-flow tests
-	@echo "Not implemented yet - lands in Phase 9 (see docs/implementation/plan.md)."
+e2e: ## Run Playwright critical-flow tests (spec §13.5) - needs a running, migrated, catalog-populated API
+	@curl -sf http://localhost:8000/api/v1/health/ready > /dev/null || \
+		(echo "error: API not reachable at localhost:8000 - run 'make db-start && make migrate && make import-data' once, then 'make dev-api' in another terminal, before 'make e2e'." >&2; exit 1)
+	cd apps/web && npx playwright test
 
 generate-api-client: ## Generate the frontend API client from the FastAPI OpenAPI schema
 	cd apps/api && uv run python -m book_app.cli.export_openapi

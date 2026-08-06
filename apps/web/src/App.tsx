@@ -1,8 +1,11 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { ErrorBoundary } from 'react-error-boundary'
 import { BrowserRouter, Route, Routes, useLocation } from 'react-router'
+import { queryClient } from './api/queryClient'
 import { AuthProvider } from './auth/AuthProvider'
 import { GuestOnly } from './auth/GuestOnly'
 import { RequireAuth } from './auth/RequireAuth'
+import { RootErrorFallback } from './components/ErrorFallback'
 import type { ModalLocationState } from './routing/modalNavigation'
 import { AccountPage } from './routes/Account'
 import { BookDetailPage } from './routes/BookDetail'
@@ -18,8 +21,7 @@ import { ShelfDetailLayout } from './routes/ShelfDetailLayout'
 import { ShelfDiscoverPage } from './routes/ShelfDiscover'
 import { ShelvesPage } from './routes/Shelves'
 import { AppShell } from './shell/AppShell'
-
-const queryClient = new QueryClient()
+import { ToastViewport } from './toast/ToastViewport'
 
 /**
  * Route-backed modal pattern (spec §12.7). When a card navigates to
@@ -77,12 +79,15 @@ export function AppRoutes() {
 
 export function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          <AppRoutes />
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
+    <ErrorBoundary FallbackComponent={RootErrorFallback}>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <AuthProvider>
+            <AppRoutes />
+          </AuthProvider>
+        </BrowserRouter>
+        <ToastViewport />
+      </QueryClientProvider>
+    </ErrorBoundary>
   )
 }

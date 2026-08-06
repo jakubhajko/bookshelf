@@ -74,6 +74,17 @@ class Settings(BaseSettings):
     auth_rate_limit_max_attempts: int = 10
     auth_rate_limit_window_seconds: float = 300.0
 
+    # --- General request limits (Phase 9) --- spec §14's "request limits",
+    # distinct from the auth-specific boundary above: a coarse per-IP
+    # backstop across every route, not a business rule. Generous by design
+    # — a single masonry page load can easily fire 20+ concurrent cover
+    # requests, and a shared/NAT IP aggregates many real visitors — this is
+    # meant to catch abusive/broken clients, not normal enthusiastic
+    # browsing. See core/request_limits.py.
+    general_rate_limit_max_requests: int = 600
+    general_rate_limit_window_seconds: float = 60.0
+    max_request_body_bytes: int = 1_000_000
+
     # --- Cover storage (Phase 2) ---
     cover_storage_backend: Literal["local", "s3"] = "local"
     cover_storage_local_path: Path = Path("data/processed/covers")

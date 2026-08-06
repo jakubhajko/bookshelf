@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from book_app.core.config import Settings
+from book_app.main import create_app
 from fastapi.testclient import TestClient
 from httpx2 import (
     Response,
@@ -258,3 +259,34 @@ def test_change_password_then_old_password_no_longer_works(client: TestClient) -
 
     assert _login(client, password=PASSWORD).status_code == 401
     assert _login(client, password=new_password).status_code == 200
+
+
+def test_login_cookies_reflect_this_apps_own_settings_instance(
+    test_database_url: str,
+) -> None:
+    """Regression test: every auth route read cookie/token settings via
+    ``Depends(get_settings)``, whose ``@lru_cache`` returns whichever
+    ``Settings()`` happened to be built *first* in the process — in
+    practice, ``main.py``'s own module-level ``app = create_app()`` on
+    first import — not the ``Settings`` a *specific* ``create_app(settings=...)``
+    call was actually given. Every other test in this file uses the shared
+    `client` fixture, whose `test_settings` only overrides `database_url`,
+    so this bug was invisible: the wrong (cached-default) instance and the
+    right (per-test) instance agreed on every field that mattered. This
+    test doesn't — a non-default `cookie_samesite` proves the fix
+    (`core/dependencies.py::get_request_settings`) actually reads *this*
+    app instance's settings, not whatever built first.
+    """
+    settings = Settings(
+        environment="test", database_url=test_database_url, cookie_samesite="strict"
+    )
+    with TestClient(create_app(settings=settings)) as client:
+        _register(client)
+        login_response = _login(client)
+        assert login_response.status_code == 200
+
+        set_cookie_headers = login_response.headers.get_list("set-cookie")
+        access_cookie = next(
+            h for h in set_cookie_headers if h.startswith("access_token=")
+        )
+        assert "samesite=strict" in access_cookie.lower()

@@ -1,0 +1,35 @@
+
+# Templated by the official nginx:alpine image's own entrypoint (built in
+# since nginx 1.19 — `envsubst`s every `/etc/nginx/templates/*.template`
+# into `/etc/nginx/conf.d/` at container *start*, not build time — no
+# custom entrypoint script needed). $API_ORIGIN must be set to the same
+# API origin `VITE_API_BASE_URL` was built with (scheme+host+port, e.g.
+# `http://localhost:8000`) — that value is baked into the JS bundle at
+# *build* time (Vite env vars are compile-time) and can't be read back
+# from it at container-start time, so it's supplied twice, deliberately.
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # spec §14 security headers — the browser-executed counterpart to
+    # core/middleware.py's `SecurityHeadersMiddleware` on the API side.
+    # `style-src 'unsafe-inline'` is required: RatingStars.tsx sets an
+    # inline `style={{clipPath: ...}}` for the half-star fill effect — a
+    # real, current usage, not defensive over-permissiveness.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' ${API_ORIGIN} data:; connect-src 'self' ${API_ORIGIN}; frame-ancestors 'none'" always;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    # SPA fallback — React Router's BrowserRouter needs every path to
+    # resolve to index.html so client-side routing can take over; a direct
+    # load of e.g. /shelves/abc/books must not 404 at the web server.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

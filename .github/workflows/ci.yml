@@ -139,3 +139,93 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  e2e:
+    name: E2E (Playwright, real Chromium — spec §13.5)
+    runs-on: ubuntu-latest
+    # A separate, freshly-migrated Postgres from the `backend` job's — this
+    # one stays up for the whole job so the API can run against it directly
+    # (the `backend` job's integration tests instead create/drop their own
+    # ephemeral per-test databases against its container).
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: book_app
+          POSTGRES_PASSWORD: book_app
+          POSTGRES_DB: book_app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U book_app -d book_app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.10.4"
+          enable-cache: true
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install backend dependencies
+        run: uv sync --all-packages
+
+      - name: Install frontend dependencies
+        run: cd apps/web && npm ci
+
+      - name: Install Playwright's Chromium (+ OS deps, fresh runner)
+        run: cd apps/web && npx playwright install --with-deps chromium
+
+      - name: Enable pg_trgm
+        run: psql -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+
+      - name: Apply migrations
+        run: cd apps/api && uv run alembic upgrade head
+
+      # The real dataset is gitignored (data/README.md) — data/sample/ is
+      # the small, checked-in fixture built for exactly this (also used by
+      # tests/integration/test_import_catalog.py), not a scaled-down
+      # substitute for it.
+      - name: Import the sample catalog
+        run: cd apps/api && uv run python -m book_app.cli.import_catalog --source ../../data/sample/books.parquet
+
+      - name: Boot the API
+        run: |
+          cd apps/api
+          COVER_STORAGE_LOCAL_PATH=data/sample/covers \
+            uv run uvicorn book_app.main:app --host 127.0.0.1 --port 8000 &
+
+          ready=""
+          for _ in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:8000/api/v1/health/ready > /dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ -z "$ready" ]; then
+            echo "API never became reachable" >&2
+            exit 1
+          fi
+
+      - name: Run Playwright critical-flow E2E
+        run: cd apps/web && npx playwright test
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/
+          retention-days: 7

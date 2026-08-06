@@ -15,10 +15,14 @@
  *    session.
  */
 import createClient, { type Middleware } from 'openapi-fetch'
+import { showToast } from '../toast/toastStore'
 import type { paths } from './generated/schema'
+import { queryClient } from './queryClient'
+import { queryKeys } from './queryKeys'
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
 const REFRESH_PATH = '/api/v1/auth/refresh'
+const BOOTSTRAP_PATH = '/api/v1/auth/me'
 const CSRF_EXEMPT_PATHS = new Set(['/api/v1/auth/register', '/api/v1/auth/login', REFRESH_PATH])
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
@@ -89,8 +93,22 @@ const sessionRefreshMiddleware: Middleware = {
     if (CSRF_EXEMPT_PATHS.has(path) || !clone) return undefined
 
     const refreshed = await ensureFreshSession()
-    if (!refreshed) return undefined
-    return fetch(clone)
+    if (refreshed) return fetch(clone)
+
+    // Refresh genuinely failed. `/auth/me`'s own 401 is the ordinary "not
+    // logged in yet" bootstrap signal (already handled by
+    // `fetchCurrentUser` returning `null`) — everything else in this app
+    // only ever runs after `RequireAuth` has already confirmed a session
+    // exists, so a 401-after-failed-refresh anywhere else means the
+    // session just died mid-use (spec §15: "login redirect after refresh
+    // failure"). Clearing the cached user here is what actually triggers
+    // the redirect — `RequireAuth` reacts to it, nothing here navigates
+    // directly.
+    if (path !== BOOTSTRAP_PATH) {
+      queryClient.setQueryData(queryKeys.auth.me, null)
+      showToast('Your session expired. Please log in again.', 'error')
+    }
+    return undefined
   },
 }
 

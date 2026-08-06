@@ -6,6 +6,12 @@
 # Config comes from the repo-root `.env` (copy `.env.example`); DATABASE_URL
 # below is composed from the same DB_* values `.env` sets so the api
 # container talks to the `db` service instead of localhost.
+#
+# Both apps/api/Dockerfile and apps/web/Dockerfile became multi-stage in
+# Phase 9 (dev + production) — `target: dev` below pins this file to the
+# same dev-only behavior it always had; `docker build --target production`
+# is a separate, manual path this compose file doesn't drive (spec §17's
+# ECR/S3 artifacts, not a local-dev concern).
 
 services:
   db:
@@ -29,6 +35,7 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+      target: dev # apps/api/Dockerfile is multi-stage since Phase 9; `make up` always runs dev
     env_file:
       - .env
     environment:
@@ -50,6 +57,7 @@ services:
     build:
       context: ./apps/web
       dockerfile: Dockerfile
+      target: dev # apps/web/Dockerfile is multi-stage since Phase 9; `make up` always runs dev
     environment:
       VITE_API_BASE_URL: http://localhost:8000
     ports:

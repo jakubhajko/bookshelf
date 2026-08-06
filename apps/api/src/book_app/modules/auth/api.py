@@ -6,8 +6,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.orm import Session
 
-from book_app.core.config import Settings, get_settings
-from book_app.core.dependencies import get_db
+from book_app.core.config import Settings
+from book_app.core.dependencies import get_db, get_request_settings
 from book_app.modules.auth import service as auth_service
 from book_app.modules.auth.cookies import (
     REFRESH_TOKEN_COOKIE,
@@ -54,7 +54,7 @@ def login(
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
+    settings: Settings = Depends(get_request_settings),
     rate_limiter: RateLimiter = Depends(get_auth_rate_limiter),
 ) -> User:
     client_ip = request.client.host if request.client else "unknown"
@@ -84,7 +84,7 @@ def refresh(
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
+    settings: Settings = Depends(get_request_settings),
 ) -> User:
     refresh_token = request.cookies.get(REFRESH_TOKEN_COOKIE)
     if not refresh_token:
@@ -106,7 +106,7 @@ def logout(
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
+    settings: Settings = Depends(get_request_settings),
     _current_user: User = Depends(get_current_user),
     _csrf: None = Depends(require_csrf),
 ) -> None:

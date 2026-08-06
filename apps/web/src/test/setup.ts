@@ -47,3 +47,16 @@ class MemoryStorage implements Storage {
 }
 vi.stubGlobal('localStorage', new MemoryStorage())
 vi.stubGlobal('sessionStorage', new MemoryStorage())
+
+// jsdom implements no pointer-capture APIs at all (verified directly:
+// `Element.prototype.hasPointerCapture` is `undefined`) — Radix Toast's
+// swipe-to-dismiss gesture handling calls these unconditionally the
+// moment a pointer event fires on a toast, throwing
+// "target.hasPointerCapture is not a function" the instant a test clicks
+// anything inside one. Dialog/AlertDialog/Popover never hit this path
+// (no swipe gesture), which is why it didn't surface until Phase 9 added
+// Toast specifically. No-op stubs are enough: nothing here asserts on
+// actual pointer-capture state, only that clicking doesn't throw.
+Element.prototype.hasPointerCapture ??= () => false
+Element.prototype.setPointerCapture ??= () => {}
+Element.prototype.releasePointerCapture ??= () => {}

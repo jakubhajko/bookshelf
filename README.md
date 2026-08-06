@@ -16,14 +16,13 @@ architectural decisions are recorded as ADRs in [`docs/adr/`](docs/adr/).
 
 ```text
 apps/api/            FastAPI backend (src/book_app/{core,modules,shared,cli})
-apps/web/             React + TypeScript + Vite frontend
+apps/web/             React + TypeScript + Vite frontend (apps/web/e2e/: Playwright E2E)
 packages/recommender/ Typed recommendation engine/provider package (no FastAPI/ORM deps)
 data/                 Dataset — gitignored except data/sample/ (small, checked-in fixture); see data/README.md
 docs/                 Implementation plan, ADRs, architecture, API docs
 infra/                Docker Compose support files, AWS architecture notes
 scripts/              Data import / dev / model-management CLIs (added as their phases land)
 tests/integration/     Real-PostgreSQL tests (migrations, catalog import, cover storage)
-tests/end_to_end/      Playwright E2E (Phase 9, not created yet)
 ```
 
 ## Prerequisites
@@ -75,57 +74,64 @@ make typecheck              mypy (backend/recommender) + tsc (frontend)
 make migrate                 apply Alembic migrations
 make import-data[-dry-run]   import books.parquet into PostgreSQL
 make cleanup-sessions        delete expired/revoked auth sessions
-make seed-demo               demo user/data (Phase 9)
+make seed-demo               create the demo_reader account with representative shelves/ratings
 make build-popularity        build the popularity recommendation artifact
-make e2e                     Playwright critical-flow tests (Phase 9)
+make e2e                     Playwright critical-flow tests (spec §13.5) — needs a running, migrated API
 make generate-api-client     frontend client from the OpenAPI schema
 ```
 
-Targets tagged with a future phase above print what phase adds them and
-exit 0 rather than fail — see `docs/implementation/plan.md` §6.
-
 ## Current status
 
-Phases 0-8 are complete — every functional surface in spec §19 now has
-both a real backend endpoint and a rendered frontend page. Backend:
-monorepo foundations; the full catalog data layer (92,526 books imported);
-authentication (register/login/refresh/logout/me/change-password, Argon2id,
-HttpOnly cookie sessions, session-bound CSRF, auth rate limiting); books/
-state/shelves (ratings and Not Interested with the full spec §5.2-§5.3
-state machine, shelves CRUD with atomic multi-shelf sync, `/me/ratings`);
-the recommendation boundary (`packages/recommender` — typed contracts,
-mock/popularity/future-pipeline engines, fallback provider chain — plus
-all three recommendation endpoints with persisted, cursor-paginated
-batches); cover image serving (`GET /api/v1/covers/{object_key}`,
-ADR-0011); and search (`GET /search/books`, spec §9.6's seven-tier ranking
-over the trigram/full-text indexes built in Phase 2, ADR-0012). Frontend:
-the auth flow and navigation shell; a responsive masonry grid used
-everywhere books are listed (Home, Similar, Shelf-books, Shelf-discover,
-Rated, Search) with infinite scroll, optimistic updates and rollback
-(spec §12.11), and accurate state badges wherever a book can arrive
-already rated/saved/Not-Interested; book detail as both a route-backed
-modal and a full page, with an accessible half-star rating control and a
-confirm-before-clearing Not-Interested control; shelves (collage overview,
+**All 9 phases are complete** — every phase in spec §18's list has landed,
+and every Functional and Architecture item in spec §19's acceptance
+checklist is satisfied. Backend: monorepo foundations; the full catalog
+data layer (92,526 books imported); authentication (register/login/
+refresh/logout/me/change-password, Argon2id, HttpOnly cookie sessions,
+session-bound CSRF, auth-specific rate limiting); books/state/shelves
+(ratings and Not Interested with the full spec §5.2-§5.3 state machine,
+shelves CRUD with atomic multi-shelf sync, `/me/ratings`); the
+recommendation boundary (`packages/recommender` — typed contracts, mock/
+popularity/future-pipeline engines, fallback provider chain — plus all
+three recommendation endpoints with persisted, cursor-paginated batches);
+cover image serving (`GET /api/v1/covers/{object_key}`, ADR-0011); search
+(`GET /search/books`, spec §9.6's seven-tier ranking, ADR-0012); and, new
+in the final phase, security headers, general (non-auth) rate limiting
+and a request-size cap, and a `make seed-demo` CLI. Frontend: the auth
+flow and navigation shell; a responsive masonry grid used everywhere
+books are listed (Home, Similar, Shelf-books, Shelf-discover, Rated,
+Search) with infinite scroll, optimistic updates and rollback (spec
+§12.11), and accurate state badges wherever a book can arrive already
+rated/saved/Not-Interested; book detail as both a route-backed modal and
+a full page, with an accessible half-star rating control and a confirm
+-before-clearing Not-Interested control; shelves (collage overview,
 create/rename/edit-description/delete, Books/Discover tabs); the Rated
-page (all 5 sorts, rating-range/genre filters); and search (debounced
-suggestions, recent searches, URL-encoded query state).
+page; search (debounced suggestions, recent searches, URL-encoded query
+state); and, new in the final phase, root/route-level error boundaries
+and a toast notification system wired into every optimistic mutation's
+failure path.
 
-293 tests (118 apps/api unit + 100 integration + 38 recommender package
-against real PostgreSQL + 37 frontend) at the Phase 7 handoff, growing to
-326 with Phase 8's additions (12 new backend search tests, 21 new frontend
-tests: 230 apps/api + 38 recommender + 58 frontend) — see
-[`docs/implementation/plan.md`](docs/implementation/plan.md) §5g for exact
-counts and coverage. Only Phase 9 (hardening)
-remains: Playwright E2E, an automated accessibility audit, security
-headers and general rate limiting, verified production Docker builds, demo
-seed data, and a final acceptance run against spec §19 in full — see the
-phase-by-phase plan and acceptance checklist in
-[`docs/implementation/plan.md`](docs/implementation/plan.md) for exactly
-what's done. Frontend UI has been verified via production builds, 58
-component/integration tests, and HTTP-level smoke tests against the live
-backend on real data (which caught and fixed a real cover-image
-path-resolution bug in Phase 7, plan.md risk #47) — not via an interactive
-browser, none is available in this environment (plan.md risk #44).
+348 tests total: 241 apps/api (unit + integration against real
+PostgreSQL, 94% combined coverage — spec §13.6's 75% floor), 38
+recommender package, 69 frontend, plus one Playwright end-to-end test
+covering spec §13.5's full 13-step critical flow (register through
+re-login, with two accessibility scans folded in) against a real
+Chromium browser — see
+[`docs/implementation/plan.md`](docs/implementation/plan.md) §5h for the
+exact commands and results, and its acceptance checklist (§4) for what's
+checked off item by item. The E2E test is where two real optimistic
+-update race conditions in `useBookState.ts` were found and fixed this
+phase (plan.md risk #68) — both reachable by any user clicking normally,
+neither caught by any jsdom test before.
+
+The one unchecked item in spec §19's Quality list: `docker compose up` is
+authored (both Dockerfiles are now production-shaped multi-stage builds)
+but not runtime-verified, since Docker has never been available in this
+environment across any phase (plan.md risk #1/#65) — everything else has
+been validated either by direct interactive testing or, as of this phase,
+by real browser automation: Playwright now drives an actual Chromium
+instance through the app's critical flow (plan.md risk #44/#66),
+resolving the earlier "no interactive browser available" limitation for
+the surfaces that flow covers.
 
 ## AWS design
 
