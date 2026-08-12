@@ -574,7 +574,7 @@ Phases mirror spec §18 exactly. Status is updated as work lands.
   authoritative invalidation," applied uniformly everywhere a card or the
   detail page can act on a book.
 - **Masonry grid** (`components/BookMasonryGrid.tsx`,
-  `hooks/useColumnCount.ts`): items distributed round-robin by index into
+  `hooks/useGridTier.ts`): items distributed round-robin by index into
   N column arrays (N from a `resize`-driven breakpoint hook — jsdom
   implements neither `matchMedia` nor `IntersectionObserver`, verified
   directly, so `matchMedia` was avoided rather than requiring a test
@@ -585,23 +585,36 @@ Phases mirror spec §18 exactly. Status is updated as work lands.
   order" the moment infinite scroll appends a page; round-robin's
   per-item column assignment never changes when items are appended at the
   end, and unlike a shortest-column-fill algorithm it needs no real image
-  height measurement to decide placement. Breakpoint→column mapping is a
-  documented, conservative pick from spec §12.5's given ranges (risk #52).
+  height measurement to decide placement. Breakpoint→column mapping, and
+  the separate percentage gutter that sets cover size independently of it,
+  are documented in risk #52.
 - **Cards** (`components/BookCard.tsx`, `ShelfSelectorPopover.tsx`,
   `BookCover.tsx`): cover (real aspect ratio preserved, title/author
   placeholder tile on a missing or failed-to-load cover, spec §12.5) +
   title/author below it + a hover/focus overlay (visible by default below
   `md`, hover-gated above it — spec §12.6's "touch controls remain usable
-  without hover") with a shelf-selector button (top-left) and a Save/Saved
-  button (top-right). The shelf selector is a Radix `Popover` around plain
-  native checkboxes rather than a custom listbox/combobox — searchable,
-  multi-select, create-a-shelf-inline, all satisfied with maximally
-  accessible native controls instead of hand-rolled ARIA (ADR-0008).
+  without hover") with a shelf-selector pill (left) and a Save/Saved button
+  (right), the two as flex siblings in one row so the shelf name truncates
+  instead of colliding with Save on a narrow column. The shelf selector is
+  a Radix `Popover` around plain native checkboxes rather than a custom
+  listbox/combobox — searchable, multi-select, create-a-shelf-inline, all
+  satisfied with maximally accessible native controls instead of
+  hand-rolled ARIA (ADR-0008). Its trigger names the shelf in play (the
+  shelf the book is on, else the one a quick Save would use), so the pill
+  is a truthful preview of the button beside it; with nothing to name it
+  falls back to a bare add affordance rather than a dropdown arrow
+  pointing at nothing. The visible shelf name is part of the trigger's
+  accessible name (WCAG 2.5.3), not replaced by an `aria-label`.
   Clicking "Saved" opens the same selector (review/edit) rather than
   instantly unsaving; clicking "Save" saves straight to the session's
   last-used shelf (`hooks/useLastUsedShelf.ts`, `sessionStorage`-backed)
   or opens the selector if there isn't one yet — a Pinterest-informed
   reading of an underspecified interaction, documented at risk #49.
+  `useLastUsedShelf` is a shared `useSyncExternalStore` over
+  `sessionStorage`, not per-instance `useState` seeded at mount: with the
+  latter, choosing a shelf on one card left every card already on screen
+  holding the value it read when *it* mounted, so their quick-Save target
+  (and the shelf their pill names) stayed stale until they remounted.
 - **Detail** (`components/BookDetailContent.tsx`,
   `routes/BookDetail.tsx`, `routes/BookDetailModal.tsx`): every spec §12.7
   field (cover, title/authors, description, year/pages/publisher/
@@ -719,18 +732,30 @@ Phases mirror spec §18 exactly. Status is updated as work lands.
   (2x2 grid of each shelf's most-recent covers, spec §12.8) + inline
   create form. Rename/edit-description/delete deliberately live on the
   shelf *detail* page, not this grid (risk #58).
-- **Shelf detail** (`routes/ShelfDetailLayout.tsx` + `ShelfBooks.tsx` +
-  `ShelfDiscover.tsx`): one layout route (`/shelves/:shelfId`) wrapping
-  Books/Discover as nested child routes so the header (name/description,
-  rename via an inline form, delete via a Radix `AlertDialog` confirming
-  spec §5.4's "ratings/other shelves unaffected" guarantee) and tab nav
-  render once, not duplicated per tab. Books tab: `GET
-  /shelves/{id}/books`, infinite-scrolled. Discover tab: `GET
-  /recommendations/shelves/{id}` (built and tested since Phase 5, rendered
-  for the first time here) — cards here default their quick-Save to *this*
-  shelf rather than the session's last-used one (spec §12.8: "defaults
-  Save to current shelf"), via a new `defaultShelfId` prop threaded through
-  `BookMasonryGrid` → `BookCard` (risk #59).
+- **Shelf detail** (`routes/ShelfDetailLayout.tsx` + `ShelfBooks.tsx`):
+  `/shelves/:shelfId/books` — the shelf itself. The layout route holds the
+  header (name/description, book count, rename via an inline form, delete
+  via a Radix `AlertDialog` confirming spec §5.4's "ratings/other shelves
+  unaffected" guarantee); the child route is `GET /shelves/{id}/books`,
+  infinite-scrolled.
+- **Shelf lens** (`routes/ShelfLens.tsx` + `ShelfDiscover.tsx` +
+  `components/ShelfLensRow.tsx`): `/shelves/:shelfId/discover` — the shelf
+  as a lens on the feed. Keeps the lens row exactly where Home had it (that
+  shelf marked `aria-current`), puts the shelf's own header under it (name,
+  count, cover preview strip, and a "View shelf" button through to the page
+  above), and runs `GET /recommendations/shelves/{id}` underneath. Cards
+  here default their quick-Save to *this* shelf rather than the session's
+  last-used one (spec §12.8: "defaults Save to current shelf"), via a
+  `defaultShelfId` prop threaded through `BookMasonryGrid` → `BookCard`
+  (risk #59).
+
+  Phase 7-9 built these as one route with Books/Discover tabs. Phase 10
+  split them: picking a shelf from the lens row is an act of *browsing*, so
+  it should swap the feed in place rather than navigate into a section
+  whose landing tab is the books the visitor already knows about. Tabs also
+  made shelf-scoped discovery the less obvious half of a shelf, reachable
+  only after two navigations. The pairing is now: lens row → lens view
+  (discovery), "View shelf"/Shelves overview → the shelf page (contents).
 - **Rated** (`routes/Rated.tsx`): all 5 sorts (backend complete since
   Phase 4) as toggle buttons, rating-range as two `<select>`s, genre as a
   plain text filter (no "list genres" endpoint exists to populate a
@@ -752,9 +777,9 @@ Phases mirror spec §18 exactly. Status is updated as work lands.
   (risk #62). The results page (`routes/Search.tsx`) reads `?q=` from the
   URL (spec §12.10: "query in URL"), infinite-scrolls, and seeds each
   result's state so badges are accurate immediately.
-- **Tests**: 21 new frontend tests across 5 new files — shelf tabs
-  (Books/Discover render distinct content, spec §13.4's explicitly named
-  gap from Phase 7), shelf rename/delete, shelf CRUD on the overview
+- **Tests**: 21 new frontend tests across 5 new files — shelf detail
+  (header above its contents; the Books/Discover tab assertions here became
+  `ShelfLens.test.tsx` in Phase 10), shelf rename/delete, shelf CRUD on the overview
   (create/empty/error), search suggestions (debounced fetch, click
   -through to a book, recent searches, submit-and-record), search results
   (empty/error/badge-accuracy), rated sort/filter re-fetching. 58 frontend
@@ -1923,7 +1948,34 @@ conservative, reversible default and document it."
     → 4 at ≥768px, "mobile 2" → 2 at ≥480px, "narrow 1-2" → 1 below that.
     Pixel breakpoints match Tailwind's default `md`/`lg`/`2xl` so the grid
     agrees with every other responsive class already in the app
-    (`hooks/useColumnCount.ts`).
+    (`hooks/useGridTier.ts`).
+
+    Column count is **not** the lever for cover size — that's the tier's
+    `gutterShare`, a percentage of the row width given over to gutters,
+    split across the N-1 gaps. The Phase 10 visual pass wanted covers at
+    ~80% for a more open feed, and briefly did it by raising the column
+    counts above the spec's ranges; that shrank covers but also changed how
+    many books were on screen, which was not the intent. Doing it through
+    the gutter keeps the spec's counts intact and separates the two
+    concerns: **columns decide how many books are visible, `gutterShare`
+    decides how large they are.** A percentage gutter (rather than a larger
+    fixed px gap) is what makes the size uniform — a card is always
+    `(100 - gutterShare) / N` percent of the row, at every viewport width,
+    where a fixed gap is a large share of a narrow column and a negligible
+    share of a wide one.
+
+    `gutterShare` is per tier rather than global, and has to be: column
+    counts are integers, so no single global value can express "every
+    tier's covers grow 8%" at the same time as "wide desktop drops to 7
+    columns". Wide desktop therefore carries 29.1 while every other tier
+    carries 19 — that gap is entirely the cost of its column change, not a
+    deliberate density difference, and the two tiers' *cover sizes* stay in
+    step. Current values put wide-desktop covers at ~176px with ~84px
+    gutters on a 1900px viewport.
+
+    Grids that don't span the viewport pass `maxColumns` to cap the count
+    (the detail dialog's "Similar books" strip), since the hook measures
+    `window`, not its container.
 53. **"New user" guidance banner heuristic is "has zero shelves," not a
     dedicated new-account check** — spec §12.4 asks for a "subtle guidance
     message" for new users without defining "new." Fetching `/me/ratings`
@@ -2188,6 +2240,48 @@ conservative, reversible default and document it."
     different datasets. The tradeoff: the test proves the *mechanism*
     (rate a book, it appears on Rated; shelve a book, it appears on that
     shelf) rather than any specific book's specific data being correct.
+75. **The Rated page offers three of spec §12.9's five sorts.** Spec lists
+    recent, highest, lowest, title, author; the UI now exposes only the
+    first three, with recent still the default. Alphabetical sorts are a
+    filing operation rather than a browsing one, and in a cover-led grid
+    they gave the row four controls' worth of weight for something nobody
+    reached for. `RatingsSort` and `GET /me/ratings` are untouched — both
+    values still validate and still work — so this is a UI trim, not a
+    capability removal, and re-adding either is one line in
+    `routes/Rated.tsx`'s `SORT_OPTIONS`.
+76. **A card's own rating is rendered as stars in the card body, not as a
+    badge over the cover.** Spec §12.6 says "state badges appear where
+    relevant" without saying where; the numeral badge was absolutely
+    positioned against the *card*, which put it at the bottom of the whole
+    card — on top of the title and author, not the cover (visible in any
+    two-line title). Rather than re-anchor it to the cover, the rating
+    moved into the flow between cover and title as five accent stars with
+    half steps, where it's legible at a glance instead of being a number
+    to read. "Not interested" stays an overlay, now correctly anchored to
+    the cover. Spec §12.6's required "title, maximum two lines; primary
+    author, one muted line" below the cover is unchanged — the stars sit
+    above them, not in their place.
+77. **The wordmark sits at the top of the left rail, inside its `<nav>`.**
+    Spec §12.2 says the rail has *exactly* Home, Shelves, Rated. The logo
+    links home, as a wordmark is expected to, and adds no destination that
+    list doesn't already contain — Home is one of the three. It was first
+    placed *outside* the `<nav>` to keep the enumerated navigation
+    literally three entries, but that left it the one piece of the page
+    belonging to no landmark, which the axe scan flagged (`region`,
+    moderate — caught by the E2E run, not by reading it); inside the
+    landmark, at the cost of Home being reachable under two names, is the
+    better trade. The rail widened from 80px to 112px to fit it legibly, which is what
+    now sets its width; `AppShell`'s content offset follows it. The
+    The artwork is `apps/web/public/logo.png`, derived from the supplied
+    2000×2000 PNG: cropped to its own bounds (the original was mostly empty
+    padding, so used as-is it rendered a postage stamp) and with its baked
+    near-black backdrop keyed to alpha, so it composites on any surface
+    instead of showing a faintly mismatched dark rectangle against
+    `--color-sidebar`. Keying classified each pixel as one of the two ink
+    colours and recovered coverage from that ink's strongest channel — a
+    plain luminance key would have left the blue spines ~82% opaque and
+    shifted their colour. The artwork's blue is #4c6fd7, which is exactly
+    `--color-accent`.
 
 ## 7. Next phase
 

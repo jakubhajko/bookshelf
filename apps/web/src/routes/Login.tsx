@@ -66,7 +66,7 @@ export function LoginPage() {
           />
 
           {error && (
-            <p role="alert" className="text-sm text-accent">
+            <p role="alert" className="text-sm text-danger">
               {error}
             </p>
           )}
@@ -82,7 +82,7 @@ export function LoginPage() {
 
         <p className="mt-6 text-center text-sm text-text-muted">
           Don&apos;t have an account?{' '}
-          <Link to="/register" className="text-accent hover:underline">
+          <Link to="/register" className="text-accent-soft hover:underline">
             Register
           </Link>
         </p>

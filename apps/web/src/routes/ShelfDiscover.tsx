@@ -1,27 +1,27 @@
 import { useInfiniteQuery } from '@tanstack/react-query'
-import { useParams } from 'react-router'
 import { queryKeys } from '../api/queryKeys'
 import * as recommendationsApi from '../api/recommendations'
 import { BookMasonryGrid, BookMasonrySkeleton } from '../components/BookMasonryGrid'
 import { useInfiniteScrollSentinel } from '../hooks/useInfiniteScrollSentinel'
 
-/** Shelf detail's "Discover" tab (spec §12.8): this shelf as a
- * recommendation lens (`GET /recommendations/shelves/{id}`, spec §5.5 —
- * excludes this shelf's own contents but allows books already on *other*
- * shelves). Cards here default their quick-Save to this shelf, not the
- * session's last-used one (spec §12.8's "defaults Save to current
- * shelf"), via `BookMasonryGrid`'s `defaultShelfId`. */
-export function ShelfDiscoverPage() {
-  const { shelfId } = useParams()
-
+/** This shelf as a recommendation lens (spec §12.8, `GET
+ * /recommendations/shelves/{id}`, spec §5.5 — excludes this shelf's own
+ * contents but allows books already on *other* shelves). Cards here
+ * default their quick-Save to this shelf, not the session's last-used one
+ * (spec §12.8's "defaults Save to current shelf"), via
+ * `BookMasonryGrid`'s `defaultShelfId`.
+ *
+ * A component taking `shelfId` rather than a route reading `useParams`:
+ * it's the body of the shelf lens view (`routes/ShelfLens.tsx`), under
+ * that page's own header, not a route in its own right. */
+export function ShelfDiscoverFeed({ shelfId }: { shelfId: string }) {
   const { data, isLoading, isError, fetchNextPage, hasNextPage, isFetchingNextPage, refetch } =
     useInfiniteQuery({
-      queryKey: queryKeys.recommendations.shelf(shelfId ?? ''),
+      queryKey: queryKeys.recommendations.shelf(shelfId),
       queryFn: ({ pageParam }) =>
-        recommendationsApi.getShelfRecommendations(shelfId ?? '', { cursor: pageParam }),
+        recommendationsApi.getShelfRecommendations(shelfId, { cursor: pageParam }),
       initialPageParam: null as string | null,
       getNextPageParam: (lastPage) => lastPage.next_cursor,
-      enabled: Boolean(shelfId),
     })
 
   const sentinelRef = useInfiniteScrollSentinel(

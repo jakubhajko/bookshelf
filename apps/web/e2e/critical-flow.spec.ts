@@ -151,13 +151,18 @@ test('critical flow: register, rate, shelve, reject, and persist across a sessio
     await page.keyboard.press('Escape')
   })
 
-  await test.step('9. open shelf Discover', async () => {
-    await page.getByRole('link', { name: 'Shelves' }).click()
-    await page.getByRole('heading', { level: 2, name: shelfNameA, exact: true }).click()
-    await expect(page).toHaveURL(/\/shelves\/[^/]+\/books$/)
-
-    await page.getByRole('link', { name: 'Discover' }).click()
+  await test.step('9. open the shelf as a lens on the feed', async () => {
+    // Picking a shelf in the lens row is the whole route into shelf-scoped
+    // discovery now — there is no Discover tab on the shelf page.
+    // `exact` because the rail's wordmark also links home, and its
+    // accessible name ("BookShelf, home") substring-matches "Home".
+    await page.getByRole('link', { name: 'Home', exact: true }).click()
+    await page.getByRole('link', { name: shelfNameA, exact: true }).click()
     await expect(page).toHaveURL(/\/shelves\/[^/]+\/discover$/)
+    await expect(page.getByRole('heading', { level: 1, name: shelfNameA })).toBeVisible()
+
+    // ...and the shelf's own contents are still one click from here.
+    await expect(page.getByRole('link', { name: 'View shelf' })).toBeVisible()
   })
 
   await test.step('10. reject another book', async () => {

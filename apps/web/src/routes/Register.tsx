@@ -67,7 +67,7 @@ export function RegisterPage() {
           />
 
           {error && (
-            <p role="alert" className="text-sm text-accent">
+            <p role="alert" className="text-sm text-danger">
               {error}
             </p>
           )}
@@ -83,7 +83,7 @@ export function RegisterPage() {
 
         <p className="mt-6 text-center text-sm text-text-muted">
           Already have an account?{' '}
-          <Link to="/login" className="text-accent hover:underline">
+          <Link to="/login" className="text-accent-soft hover:underline">
             Log in
           </Link>
         </p>

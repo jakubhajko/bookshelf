@@ -2,7 +2,7 @@ import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Pencil, Trash2 } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
-import { NavLink, Outlet, useNavigate, useParams } from 'react-router'
+import { Outlet, useNavigate, useParams } from 'react-router'
 import { ApiError } from '../api/client'
 import { queryKeys } from '../api/queryKeys'
 import * as shelvesApi from '../api/shelves'
@@ -10,11 +10,6 @@ import type { Shelf } from '../api/shelves'
 import { TextField } from '../components/TextField'
 import { showToast } from '../toast/toastStore'
 import { NotFoundPage } from './NotFound'
-
-const TAB_CLASS = ({ isActive }: { isActive: boolean }) =>
-  `border-b-2 px-1 pb-2 text-sm font-medium ${
-    isActive ? 'border-accent text-text' : 'border-transparent text-text-muted hover:text-text'
-  }`
 
 function EditShelfForm({ shelf, onDone }: { shelf: Shelf; onDone: () => void }) {
   const [name, setName] = useState(shelf.name)
@@ -63,7 +58,7 @@ function EditShelfForm({ shelf, onDone }: { shelf: Shelf; onDone: () => void }) 
         />
       </div>
       {error && (
-        <p role="alert" className="text-sm text-accent">
+        <p role="alert" className="text-sm text-danger">
           {error}
         </p>
       )}
@@ -154,9 +149,11 @@ function DeleteShelfButton({ shelf }: { shelf: Shelf }) {
   )
 }
 
-/** Shared header (name/description, rename/delete, spec §12.8) + Books/
- * Discover tabs for one shelf, wrapping both via a nested route so neither
- * duplicates the fetch or the chrome. */
+/** The shelf itself (spec §12.8): its header — name/description, book
+ * count, rename/delete — above its contents. Shelf-scoped discovery is not
+ * a tab here; it's the lens view (`routes/ShelfLens.tsx`) that this page's
+ * "View shelf" button is reached from. The nested route is kept so the
+ * header fetches the shelf once, independent of what it wraps. */
 export function ShelfDetailLayout() {
   const { shelfId } = useParams()
   const [editing, setEditing] = useState(false)
@@ -219,16 +216,7 @@ export function ShelfDetailLayout() {
         </div>
       )}
 
-      <nav aria-label="Shelf sections" className="mt-6 flex gap-6 border-b border-border">
-        <NavLink to={`/shelves/${shelfId}/books`} className={TAB_CLASS}>
-          Books
-        </NavLink>
-        <NavLink to={`/shelves/${shelfId}/discover`} className={TAB_CLASS}>
-          Discover
-        </NavLink>
-      </nav>
-
-      <div className="mt-6">
+      <div className="mt-8">
         <Outlet />
       </div>
     </div>

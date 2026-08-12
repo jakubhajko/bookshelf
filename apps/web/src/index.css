@@ -11,20 +11,38 @@
  * `--radius-lg` becomes `rounded-lg`, etc.
  */
 @theme {
-  --color-background: #0a0a0b;
-  --color-surface: #18181b;
-  --color-surface-hover: #232327;
-  --color-border: #2e2e33;
+  --color-background: #1b1b1e;
+  --color-surface: #26262a;
+  --color-surface-hover: #303036;
+  --color-border: #35353b;
 
-  --color-text: #f4f4f5;
-  --color-text-muted: #a1a1aa;
+  --color-text: #f2f2f3;
+  --color-text-muted: #a8a8b0;
 
-  --color-accent: #e11d48;
-  --color-accent-hover: #f43f5e;
+  /* Single accent, used deliberately: the card Save action, primary
+   * buttons, focus rings, and active-state underlines — nothing else.
+   * #4c6fd7 rather than the #4e71d9 it was picked from: two units darker
+   * puts white body text on an accent fill at 4.60:1 instead of 4.48:1,
+   * i.e. on the passing side of WCAG AA, which the e2e axe gate enforces
+   * (contrast violations are `serious`). The difference is imperceptible. */
+  --color-accent: #4c6fd7;
+  --color-accent-hover: #4261c7;
+  --color-accent-active: #3a57b4;
   --color-accent-text: #ffffff;
+  /* Accent tint for accent-colored *text* on a dark surface, where the
+   * solid accent only reaches ~3.3-3.7:1. Never used as a fill. */
+  --color-accent-soft: #8da6ee;
 
-  --color-sidebar: #111113;
-  --color-topbar: #111113;
+  /* Errors and destructive states. Previously these borrowed the rose
+   * accent; with a blue accent they need their own token or "invalid
+   * password" would render in the same color as a link. */
+  --color-danger: #f87171;
+
+  /* The rail and top bar sit at the page background rather than a darker
+   * panel color — sections are separated by spacing, not by fills or
+   * divider lines. Kept as distinct tokens so that stays a values swap. */
+  --color-sidebar: #1b1b1e;
+  --color-topbar: #1b1b1e;
 
   --radius-sm: 0.375rem;
   --radius-md: 0.625rem;

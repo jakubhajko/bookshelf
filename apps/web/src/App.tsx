@@ -18,7 +18,7 @@ import { RegisterPage } from './routes/Register'
 import { SearchPage } from './routes/Search'
 import { ShelfBooksPage } from './routes/ShelfBooks'
 import { ShelfDetailLayout } from './routes/ShelfDetailLayout'
-import { ShelfDiscoverPage } from './routes/ShelfDiscover'
+import { ShelfLensPage } from './routes/ShelfLens'
 import { ShelvesPage } from './routes/Shelves'
 import { AppShell } from './shell/AppShell'
 import { ToastViewport } from './toast/ToastViewport'
@@ -54,9 +54,13 @@ export function AppRoutes() {
             <Route path="/search" element={<SearchPage />} />
             <Route path="/books/:bookId" element={<BookDetailPage />} />
             <Route path="/shelves" element={<ShelvesPage />} />
+            {/* The lens view sits outside `ShelfDetailLayout`: it carries
+              * the feed's own chrome (lens row, shelf header, "View
+              * shelf") rather than the shelf page's rename/delete header,
+              * so the two no longer share a layout. */}
+            <Route path="/shelves/:shelfId/discover" element={<ShelfLensPage />} />
             <Route path="/shelves/:shelfId" element={<ShelfDetailLayout />}>
               <Route path="books" element={<ShelfBooksPage />} />
-              <Route path="discover" element={<ShelfDiscoverPage />} />
             </Route>
             <Route path="/rated" element={<RatedPage />} />
             <Route path="/account" element={<AccountPage />} />

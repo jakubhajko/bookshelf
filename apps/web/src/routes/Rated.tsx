@@ -7,12 +7,15 @@ import { BookMasonryGrid, BookMasonrySkeleton } from '../components/BookMasonryG
 import { useSeedRatingsIntoBookState } from '../hooks/useBookState'
 import { useInfiniteScrollSentinel } from '../hooks/useInfiniteScrollSentinel'
 
+/** Recent (the default), Highest, Lowest. The API also supports `title`
+ * and `author` (spec §9.4) — deliberately not surfaced: sorting a visual
+ * grid alphabetically is a filing operation, not a browsing one, and the
+ * three that remain are the only ones anyone reached for. Re-adding either
+ * is one line here; nothing else needs to change. */
 const SORT_OPTIONS: { value: RatingsSort; label: string }[] = [
   { value: 'recent', label: 'Recent' },
   { value: 'highest', label: 'Highest' },
   { value: 'lowest', label: 'Lowest' },
-  { value: 'title', label: 'Title' },
-  { value: 'author', label: 'Author' },
 ]
 
 const RATING_STEPS = [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5]

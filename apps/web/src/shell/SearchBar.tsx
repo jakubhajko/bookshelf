@@ -71,10 +71,16 @@ export function SearchBar() {
           <label htmlFor="site-search" className="sr-only">
             Search books
           </label>
-          <div className="relative max-w-xl">
+          {/* Spans the whole width of its section (spec §12.10: "large").
+            * Borderless and unshadowed — it reads as a recessed band in
+            * the page rather than a floating box, separated from the
+            * background by fill alone. `rounded-lg` against the covers'
+            * `rounded-md` isn't the same number, but at this height the
+            * two read as the same family. */}
+          <div className="relative">
             <SearchIcon
               aria-hidden
-              className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-text-muted"
+              className="pointer-events-none absolute top-1/2 left-4 h-4 w-4 -translate-y-1/2 text-text-muted"
             />
             <input
               id="site-search"
@@ -87,7 +93,7 @@ export function SearchBar() {
               }}
               onFocus={() => setOpen(true)}
               autoComplete="off"
-              className="w-full rounded-full border border-border bg-surface py-2 pr-4 pl-10 text-sm text-text placeholder:text-text-muted focus:ring-2 focus:ring-accent focus:outline-none"
+              className="h-11 w-full rounded-lg bg-surface pr-4 pl-11 text-sm text-text placeholder:text-text-muted focus:ring-2 focus:ring-accent focus:outline-none"
             />
           </div>
         </form>
@@ -98,7 +104,7 @@ export function SearchBar() {
           onOpenAutoFocus={(event) => event.preventDefault()}
           align="start"
           sideOffset={8}
-          className="z-20 w-[calc(100vw-2rem)] max-w-xl rounded-md border border-border bg-surface p-1 shadow-lg"
+          className="z-20 w-[var(--radix-popover-trigger-width)] rounded-lg border border-border bg-surface p-1 shadow-lg"
         >
           {trimmedQuery.length === 0 && recentSearches.length > 0 && (
             <div>

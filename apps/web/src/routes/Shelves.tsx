@@ -75,7 +75,7 @@ function CreateShelfForm() {
         Create
       </button>
       {error && (
-        <p role="alert" className="w-full text-sm text-accent">
+        <p role="alert" className="w-full text-sm text-danger">
           {error}
         </p>
       )}

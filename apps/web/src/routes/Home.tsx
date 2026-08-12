@@ -1,51 +1,14 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
-import { useNavigate } from 'react-router'
 import { queryKeys } from '../api/queryKeys'
 import * as recommendationsApi from '../api/recommendations'
 import * as shelvesApi from '../api/shelves'
 import { BookMasonryGrid, BookMasonrySkeleton } from '../components/BookMasonryGrid'
+import { ShelfLensRow } from '../components/ShelfLensRow'
 import { useInfiniteScrollSentinel } from '../hooks/useInfiniteScrollSentinel'
 import { useScrollRestoration } from '../hooks/useScrollRestoration'
 
 const GUIDANCE_DISMISSED_KEY = 'bookshelf:home-guidance-dismissed'
-
-/** For You + user shelves (spec §12.4). Shelf chips navigate to that
- * shelf's own Discover feed (`/shelves/:shelfId/discover`, a Phase 8 page)
- * rather than re-rendering shelf-scoped recommendations inline — Home's
- * own spec §18 scope is the "home" feed itself, not the shelf-discovery
- * feed's content. */
-function ShelfLensRow() {
-  const navigate = useNavigate()
-  const { data: shelves = [] } = useQuery({
-    queryKey: queryKeys.shelves.list,
-    queryFn: shelvesApi.listShelves,
-    staleTime: 30_000,
-  })
-
-  if (shelves.length === 0) return null
-
-  return (
-    <nav aria-label="Feed lens" className="flex gap-2 overflow-x-auto px-4 py-3 sm:px-6">
-      <span
-        aria-current="page"
-        className="shrink-0 rounded-full bg-accent px-4 py-1.5 text-sm font-medium text-accent-text"
-      >
-        For You
-      </span>
-      {shelves.map((shelf) => (
-        <button
-          key={shelf.id}
-          type="button"
-          onClick={() => void navigate(`/shelves/${shelf.id}/discover`)}
-          className="shrink-0 rounded-full border border-border bg-surface px-4 py-1.5 text-sm text-text hover:bg-surface-hover focus:outline-none focus:ring-2 focus:ring-accent"
-        >
-          {shelf.name}
-        </button>
-      ))}
-    </nav>
-  )
-}
 
 /** Spec §12.4: "New users receive fallback feed and a subtle guidance
  * message. No forced onboarding." — dismissible (never blocks the feed)

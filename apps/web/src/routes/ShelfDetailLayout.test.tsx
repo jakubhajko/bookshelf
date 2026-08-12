@@ -26,8 +26,7 @@ function renderAt(path: string) {
         <Routes>
           <Route path="/shelves" element={<p>shelves overview</p>} />
           <Route path="/shelves/:shelfId" element={<ShelfDetailLayout />}>
-            <Route path="books" element={<p>books tab content</p>} />
-            <Route path="discover" element={<p>discover tab content</p>} />
+            <Route path="books" element={<p>books content</p>} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -41,22 +40,21 @@ describe('ShelfDetailLayout', () => {
     vi.spyOn(shelvesApi, 'getShelf').mockResolvedValue(SHELF)
   })
 
-  it('renders Books and Discover tabs (spec §12.8), each showing their own route', async () => {
+  it('renders the shelf header above its contents (spec §12.8)', async () => {
     renderAt('/shelves/s1/books')
 
     expect(await screen.findByRole('heading', { name: 'Sci-Fi' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Books' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Discover' })).toBeInTheDocument()
-    expect(screen.getByText('books tab content')).toBeInTheDocument()
-    expect(screen.queryByText('discover tab content')).not.toBeInTheDocument()
+    expect(screen.getByText('Space and robots')).toBeInTheDocument()
+    expect(screen.getByText('3 books')).toBeInTheDocument()
+    expect(screen.getByText('books content')).toBeInTheDocument()
   })
 
-  it('switches to the Discover tab content on navigation', async () => {
-    renderAt('/shelves/s1/discover')
-
+  it('no longer offers Discover as a tab — it is the lens view now', async () => {
+    renderAt('/shelves/s1/books')
     await screen.findByRole('heading', { name: 'Sci-Fi' })
-    expect(screen.getByText('discover tab content')).toBeInTheDocument()
-    expect(screen.queryByText('books tab content')).not.toBeInTheDocument()
+
+    expect(screen.queryByRole('link', { name: 'Discover' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Books' })).not.toBeInTheDocument()
   })
 
   it('renames the shelf', async () => {

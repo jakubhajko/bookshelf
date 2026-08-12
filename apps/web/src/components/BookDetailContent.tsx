@@ -67,7 +67,10 @@ function SimilarBooksSection({ bookId }: { bookId: number }) {
       )}
       {data && data.items.length > 0 && (
         <div className="mt-3">
-          <BookMasonryGrid items={data.items} />
+          {/* Capped: this strip lives inside the detail dialog, roughly a
+            * third of the viewport wide, so the full-width tier's column
+            * count would shrink these covers to thumbnails. */}
+          <BookMasonryGrid items={data.items} maxColumns={4} />
         </div>
       )}
     </section>
@@ -152,7 +155,7 @@ export function BookDetailContent({ bookId }: { bookId: number }) {
 
           {book.average_rating !== null && (
             <p className="mt-3 flex items-center gap-1.5 text-sm text-text-muted">
-              <Star aria-hidden fill="currentColor" className="h-4 w-4 text-accent" />
+              <Star aria-hidden fill="currentColor" className="h-4 w-4" />
               {book.average_rating.toFixed(2)}
               {book.ratings_count !== null && ` (${book.ratings_count.toLocaleString()} ratings)`}
             </p>

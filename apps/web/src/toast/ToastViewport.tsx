@@ -5,7 +5,7 @@ import { dismissToast, getToastSnapshot, subscribeToasts, type ToastVariant } fr
 
 const VARIANT_STYLES: Record<ToastVariant, { border: string; Icon: typeof Info }> = {
   success: { border: 'border-l-emerald-500', Icon: CheckCircle2 },
-  error: { border: 'border-l-accent', Icon: XCircle },
+  error: { border: 'border-l-danger', Icon: XCircle },
   info: { border: 'border-l-border', Icon: Info },
 }
 

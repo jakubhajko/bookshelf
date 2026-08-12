@@ -47,7 +47,7 @@ describe('ShelfSelectorPopover', () => {
     const user = userEvent.setup()
     renderPopover()
 
-    await user.click(screen.getByRole('button', { name: 'Add to shelf' }))
+    await user.click(screen.getByRole('button', { name: /^Add to shelf/ }))
 
     expect(await screen.findByRole('checkbox', { name: 'To Read' })).toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: 'Favorites' })).toBeInTheDocument()
@@ -56,7 +56,7 @@ describe('ShelfSelectorPopover', () => {
   it('filters shelves as the search text changes', async () => {
     const user = userEvent.setup()
     renderPopover()
-    await user.click(screen.getByRole('button', { name: 'Add to shelf' }))
+    await user.click(screen.getByRole('button', { name: /^Add to shelf/ }))
     await screen.findByRole('checkbox', { name: 'To Read' })
 
     await user.type(screen.getByPlaceholderText('Search or create a shelf'), 'Fav')
@@ -69,7 +69,7 @@ describe('ShelfSelectorPopover', () => {
     const user = userEvent.setup()
     vi.spyOn(booksApi, 'syncBookShelves').mockResolvedValue(['s1'])
     renderPopover()
-    await user.click(screen.getByRole('button', { name: 'Add to shelf' }))
+    await user.click(screen.getByRole('button', { name: /^Add to shelf/ }))
 
     await user.click(await screen.findByRole('checkbox', { name: 'To Read' }))
 
@@ -89,7 +89,7 @@ describe('ShelfSelectorPopover', () => {
     })
     vi.spyOn(booksApi, 'syncBookShelves').mockResolvedValue(['s3'])
     renderPopover()
-    await user.click(screen.getByRole('button', { name: 'Add to shelf' }))
+    await user.click(screen.getByRole('button', { name: /^Add to shelf/ }))
     await screen.findByRole('checkbox', { name: 'To Read' })
 
     await user.type(screen.getByPlaceholderText('Search or create a shelf'), 'Sci-Fi')
@@ -102,7 +102,7 @@ describe('ShelfSelectorPopover', () => {
   it('does not offer to create a shelf that already exists (case-insensitive)', async () => {
     const user = userEvent.setup()
     renderPopover()
-    await user.click(screen.getByRole('button', { name: 'Add to shelf' }))
+    await user.click(screen.getByRole('button', { name: /^Add to shelf/ }))
     await screen.findByRole('checkbox', { name: 'To Read' })
 
     await user.type(screen.getByPlaceholderText('Search or create a shelf'), 'to read')

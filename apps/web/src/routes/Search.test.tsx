@@ -41,7 +41,7 @@ describe('SearchPage', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
   })
 
-  it('renders results with an accurate rating badge (spec §9.6: prior states stay visible)', async () => {
+  it('renders results with an accurate rating (spec §9.6: prior states stay visible)', async () => {
     vi.spyOn(searchApi, 'searchBooks').mockResolvedValue({
       items: [
         {
@@ -58,6 +58,8 @@ describe('SearchPage', () => {
     renderAt('/search?q=rated')
 
     expect(await screen.findByText('Already Rated Book')).toBeInTheDocument()
-    expect(screen.getByText('4.5')).toBeInTheDocument()
+    // Shown as stars rather than a numeral, so the half-step has to survive
+    // into the accessible name for this to mean anything.
+    expect(screen.getByRole('img', { name: 'You rated this 4.5 out of 5' })).toBeInTheDocument()
   })
 })

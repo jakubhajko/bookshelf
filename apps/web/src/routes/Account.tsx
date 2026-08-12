@@ -74,7 +74,7 @@ export function AccountPage() {
           />
 
           {error && (
-            <p role="alert" className="text-sm text-accent">
+            <p role="alert" className="text-sm text-danger">
               {error}
             </p>
           )}

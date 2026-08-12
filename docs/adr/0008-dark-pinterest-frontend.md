@@ -41,7 +41,17 @@ structured so a light theme is a values swap, not a rewrite.
 
 - Every new visual surface must be built from the token set, not ad hoc
   colors, or a future light theme becomes a per-component rewrite instead of
-  a token swap.
+  a token swap. The Phase 10 visual pass exercised this: re-theming from
+  near-black + rose to charcoal + blue was a values edit in `index.css`
+  plus two token additions, with no component restructuring. Those two
+  additions — `danger` and `accent-soft` — are load-bearing rather than
+  decorative. `danger` exists because errors had been borrowing the accent,
+  which only read as "error" while the accent happened to be red; once it
+  turned blue, invalid-credential text would have been indistinguishable
+  from a link. `accent-soft` exists because the solid accent reaches only
+  ~3.3-3.7:1 as text on the dark surfaces, so accent-colored *text* needs a
+  lighter tint than accent-colored *fills*. A light theme will need to keep
+  both distinctions, in the other direction.
 - Accessible headless primitives (focus trap, `Escape` handling, ARIA roles)
   are a Phase 1-onward dependency choice, not something bolted on during the
   Phase 9 accessibility pass — the hardening phase audits and fixes gaps, it

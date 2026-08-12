@@ -20,7 +20,7 @@ export function AppShell() {
   return (
     <div className="min-h-screen bg-background text-text">
       <LeftRail />
-      <div className="flex flex-col md:pl-20">
+      <div className="flex flex-col md:pl-28">
         <TopBar />
         <main className="flex-1 pb-16 md:pb-0">
           <ErrorBoundary FallbackComponent={RouteErrorFallback} resetKeys={[pathname]}>
