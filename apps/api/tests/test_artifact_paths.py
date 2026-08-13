@@ -18,8 +18,22 @@ def test_absolute_path_passes_through_unchanged() -> None:
     assert resolve_artifact_root(absolute) == absolute
 
 
-def test_repo_root_actually_contains_the_app_specification() -> None:
+def test_repo_root_index_points_at_the_real_repo_root() -> None:
     """Confirms the hardcoded ``parents[N]`` index in artifact_paths.py
     still points at the real repo root, not some other ancestor directory —
-    a future file move could silently break the index without this."""
-    assert (_REPO_ROOT / "APP_SPECIFICATION.md").is_file()
+    a future file move could silently break the index without this.
+
+    Anchored on the workspace's *structural* markers (the Makefile, the
+    workspace-root ``pyproject.toml``, and the two member directories it
+    declares) rather than on a specification document. The original version
+    of this check used root ``APP_SPECIFICATION.md`` as its sentinel and
+    broke the moment that document was reorganized into
+    ``archive_of_structural_prompts/`` — a documentation move that says
+    nothing about whether this path index is still correct. The monorepo
+    layout below is non-negotiable architecture (CLAUDE.md), so it is a
+    sentinel that only changes when the thing being asserted really does.
+    """
+    assert (_REPO_ROOT / "Makefile").is_file()
+    assert (_REPO_ROOT / "pyproject.toml").is_file()
+    assert (_REPO_ROOT / "apps").is_dir()
+    assert (_REPO_ROOT / "packages").is_dir()

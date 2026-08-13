@@ -1,0 +1,1054 @@
+# Bookshelf — Recommender System Specification
+
+## 0. Status and authority
+
+This document is the authoritative specification for integrating the production recommender system into the existing Bookshelf application.
+
+It does **not** replace `APP_SPECIFICATION.md` for general product/domain behavior. It narrows and extends the application specification for recommendation-related work.
+
+When documents conflict, use this precedence for recommender work:
+
+1. `CLAUDE.md`
+2. `RECOMMENDER_SPECIFICATION.md`
+3. current ADRs, unless explicitly superseded by a new ADR created during this work
+4. `APP_SPECIFICATION.md`
+5. `docs/implementation/plan.md`
+6. existing implementation, after verifying whether it is active, placeholder, or legacy
+
+Do not silently violate an existing ADR. If this specification intentionally changes an architectural decision, document the change with a new ADR.
+
+---
+
+# 1. Goal
+
+Replace the current mock recommendation logic with a modular, artifact-backed recommendation funnel that supports multiple recommendation surfaces and remains compatible with the existing provider/engine boundary, fallback provider, eligibility rules, persisted recommendation batches, pagination, and application architecture.
+
+Target funnel:
+
+```text
+RecommendationRequest
+        ↓
+Surface configuration
+        ↓
+Candidate generators
+   ├── ALS collaborative filtering
+   ├── item-item collaborative filtering
+   ├── semantic/content retrieval
+   ├── Goodreads/source-similarity graph
+   └── popularity fallback
+        ↓
+Candidate union + weighted rank fusion
+        ↓
+Feature enrichment
+        ↓
+Deterministic V1 ranker
+        ↓
+Surface-specific diversity / UX reranker
+        ↓
+Final authoritative ordered batch
+```
+
+The implementation must be intentionally extensible to a later session-aware candidate generator and learned ranking model, but neither a sequence model nor a learned online ranker is required in V1.
+
+---
+
+# 2. Existing architecture that must be preserved
+
+The current repository already has a strong recommender integration seam. Preserve these properties unless a verified implementation detail requires a narrowly-scoped adjustment:
+
+- `packages/recommender` remains independent from FastAPI and SQLAlchemy.
+- Recommendation inference receives immutable snapshots and artifact-backed data; the engine must not query PostgreSQL directly.
+- Services own transactions; repositories never commit.
+- No database transaction may remain open during recommendation inference.
+- `RecommendationProvider` / `RecommendationEngine` boundaries remain the main serving seam.
+- `InProcessProvider` and `FallbackProvider` remain in use.
+- `FuturePipelineRecommendationEngine` is the intended plug point for the final pipeline.
+- Application-owned eligibility/exclusion rules remain outside the recommender engine.
+- Persisted recommendation batches, cursors, defensive catalog validation, impressions, and ordering semantics remain intact.
+- The engine returns the final authoritative ordering. Nothing downstream re-sorts it.
+- Artifacts continue to use the existing `ArtifactManifest` and three-way item mapping:
+  - PostgreSQL `book_id`
+  - stable `work_id`
+  - model-local `model_item_index`
+- `work_id` is the durable cross-system identity. PostgreSQL autoincrement `book_id` must never be treated as durable across database rebuilds.
+- Missing/corrupt recommender artifacts must degrade to the existing popularity fallback rather than fail application startup.
+
+Current recommendation surfaces remain:
+
+- Home / All feed
+- Shelf discovery feed
+- Similar-books section on a book detail page
+
+Search remains a separate product surface in V1. Search behavior should be instrumented, but semantic/hybrid search is not required by this implementation.
+
+---
+
+# 3. Core design principle: raw user actions, derived recommender representations
+
+Do **not** create one universal stored ML score for a user or book interaction.
+
+Persist raw product actions and their provenance. Different candidate generators are allowed to interpret the same evidence differently.
+
+Examples:
+
+- ALS should primarily use durable positive preferences such as ratings, saves, and explicit taste seeds.
+- Item-item CF should use a weighted set of positively interacted seed books.
+- Semantic retrieval may use ratings/saves/taste seeds and, at lower weight, recent opens.
+- A future session generator may heavily weight recent opens and search intent.
+- `Not Interested` remains a strong explicit negative and hard exclusion where product rules require it.
+- An impression with no click/open is exposure, not a negative preference in V1.
+
+Do not add dwell time, mouse movement, hover time, scroll depth, or similar noisy instrumentation in this implementation.
+
+---
+
+# 4. Interaction instrumentation and attribution
+
+## 4.1 Browsing session
+
+Add a short-lived browsing-session identity distinct from the existing authentication session.
+
+Preferred behavior:
+
+- UUID generated by the frontend.
+- Stored in `sessionStorage` so each tab has its own browsing session.
+- Rotate after approximately 30 minutes of inactivity.
+- Send it with relevant interaction/recommendation actions.
+- Do not reuse the 30-day authentication-session `sid` as a browsing session.
+
+Centralize this in one frontend hook/service rather than scattering `sessionStorage` access.
+
+## 4.2 Book-open event
+
+Add a raw `book_opened` interaction event for intentional book-detail opens.
+
+Use a dedicated interaction/event write path rather than making a normal `GET /books/{id}` endpoint have hidden side effects. The event should be best-effort from the UI and must not block navigation.
+
+A book-open event should support, when known:
+
+- `user_id`
+- `book_id`
+- `occurred_at`
+- `surface`
+- `session_id`
+- `recommendation_request_id`
+- `rank_position`
+- `search_query_id`
+- `source_book_id`
+- optional payload only for genuinely useful structured context
+
+Do not invent attribution if it is not known.
+
+## 4.3 Recommendation attribution
+
+The frontend already receives recommendation request/rank information. Preserve it through the user journey.
+
+When an action originated from a recommendation card or recommendation-opened detail view, propagate optional attribution into subsequent:
+
+- `book_opened`
+- save-to-shelf
+- rating set/change
+- `Not Interested`
+- other strong interaction events where the source is known
+
+Introduce one shared typed attribution shape in API/frontend code. Do not define slightly different request-id/rank/surface fields in every endpoint.
+
+Attribution should be optional so actions initiated from non-recommendation surfaces continue to work.
+
+## 4.4 Search instrumentation
+
+Log only **meaningful submitted/committed searches**, not every debounced autocomplete request.
+
+Preferred domain model:
+
+```text
+search_queries
+  id
+  user_id
+  session_id
+  query_text
+  occurred_at
+  optional result_count / surface metadata if naturally available
+```
+
+A subsequent search-result book open should carry `search_query_id` and rank if known.
+
+Do not turn the lexical search endpoint itself into a recommender surface in this phase.
+
+## 4.5 Existing impression correctness
+
+Before relying on impression data, verify and fix the existing duplicate-impression failure mode: re-fetching the same persisted recommendation page/cursor must not violate the unique `(request_id, book_id)` impression constraint or return a 500.
+
+Make impression insertion idempotent and test repeated cursor/page retrieval.
+
+---
+
+# 5. User recommendation context
+
+Extend the immutable recommender context without removing existing convenient fields.
+
+The recommender should retain global sets used for eligibility, while also preserving shelf attribution and time.
+
+Add a snapshot concept similar to:
+
+```python
+SavedBookSnapshot(
+    book_id: int,
+    shelf_id: UUID,
+    added_at: datetime,
+)
+```
+
+A book may appear in multiple shelves; do not collapse those memberships.
+
+The context should make available, at minimum:
+
+- ratings with rating value + timestamp
+- global `saved_book_ids` for convenience/eligibility
+- per-shelf saved-book membership with `added_at`
+- shelf IDs and shelf summaries
+- `Not Interested` book IDs
+- recent interaction events with enough fields to understand event type, book, timestamp, shelf, session and attribution when available
+- explicit taste-seed books from onboarding
+- deterministic long-term `profile_version`
+
+The global `profile_version` should change when long-term preference evidence changes (ratings, saves, Not Interested, onboarding taste seeds). It should not be invalidated by every passive impression. Session recency can use browsing-session state separately.
+
+Do not remove current bounds on large context components without considering latency/memory. Add explicit bounds/config where needed and document truncation order.
+
+---
+
+# 6. Cold-start taste seeding
+
+Add a skippable onboarding mechanism that lets a new user select several books they already like.
+
+Product requirements:
+
+- optional/skippable
+- simple book search/discovery selection UI
+- ideally encourages roughly 3–10 selections, but does not hard-block completion if fewer are selected
+- selections are **not** fake ratings and are **not** automatic shelf saves
+- selections are explicit taste seeds
+
+Persist current taste-seed state as a product/domain concept, not as an opaque ML vector. Prefer a small `user_taste_seeds` state table with `(user_id, book_id, selected_at, source)` plus corresponding raw interaction events if this fits the current repository patterns better than extending `user_book_states`.
+
+Do not overload rating semantics.
+
+Cold-start behavior:
+
+- new user with taste seeds: immediately enable ALS fold-in, item-item seeds, and semantic profile queries
+- new user that skips onboarding: diversified popularity/quality Home fallback
+- empty shelf + known user: use conservative global context and popularity until the shelf gains seeds
+- empty shelf + new user: popularity fallback
+- Similar Books is not truly cold because the source book itself is a retrieval seed
+
+---
+
+# 7. Signal policy
+
+All numeric values below are **configurable defaults**, not universal truths. Keep them centralized in typed pipeline configuration and easy to tune. Do not scatter magic numbers across generators.
+
+## 7.1 Live application signal semantics
+
+| Raw signal | Long-term preference | ALS V1 | Item-item seed | Semantic profile | Future session | Eligibility |
+|---|---|---:|---:|---:|---:|---|
+| onboarding taste seed | strong positive | strong + | strong | strong | low | normal product rules |
+| rating 9–10 / 10 | very strong positive | strong + | strong | strong | medium | known/rated exclusion rules |
+| rating 8 / 10 | strong positive | strong + | strong | strong | medium | known/rated exclusion rules |
+| rating 7 / 10 | mild positive | mild + | mild | mild | low/medium | known/rated exclusion rules |
+| rating 6 / 10 | approximately neutral | omit | omit | omit | low | known/rated exclusion rules |
+| rating 4–5 / 10 | mild negative evidence | omit from ALS V1 | do not seed | negative/repulsion signal | low negative | known/rated exclusion rules |
+| rating 1–3 / 10 | strong negative evidence | omit from ALS V1 | do not seed | strong negative/repulsion | negative | known/rated exclusion rules |
+| save to shelf | strong positive | strong + | strong | strong + shelf-specific | strong if recent | surface-specific saved exclusions |
+| remove from shelf | correction / weak negative | omit | remove seed if no other positive evidence | remove/reduce membership signal | weak negative | membership removed |
+| book opened | weak attention | omit from long-term ALS V1 | normally omit from long-term item-CF | low positive if recent | strong | no hard exclusion |
+| Not Interested | explicit strong negative | hard exclusion; do not require negative ALS confidence V1 | never seed | strong negative/repulsion | negative | hard exclusion where applicable |
+| impression only | exposure | 0 | 0 | 0 | exposure only | none |
+| submitted search | contextual intent | 0 | 0 | query semantics when later used | strong future context | none |
+
+For a book with multiple positive signals, avoid uncontrolled double-counting. Define a deliberate combination policy (for example, max-dominant or capped additive evidence) per generator.
+
+## 7.2 Historical Book-Crossing data for CF training
+
+Historical data has no timestamps. Never invent recency.
+
+`rating == 0` is implicit positive interaction, not negative.
+
+Use a conservative configurable training mapping initially:
+
+- historical rating `0`: weak positive confidence
+- explicit `1–5`: do not treat as positive; omit from the positive preference matrix in V1
+- explicit `6`: weak positive / optional based on evaluation
+- explicit `7`: positive
+- explicit `8`: stronger positive
+- explicit `9`: strong positive
+- explicit `10`: strongest positive
+
+Do not force negative-confidence ALS training in V1 merely because the library supports it. Establish a reliable positive-preference baseline first, evaluate, and keep the training transform versioned in artifact metadata.
+
+---
+
+# 8. Artifact strategy and runtime boundary
+
+Use artifact-backed item data rather than database lookups from the recommender engine.
+
+Offline/build-time code may read PostgreSQL and processed Parquet files. Runtime engine code must operate on immutable request context plus artifacts loaded once per process.
+
+Every artifact must record enough metadata to reproduce and reject incompatible data:
+
+- model/artifact name
+- model version
+- catalog version
+- creation/training timestamp
+- stable item mapping (`book_id`, `work_id`, `model_item_index`)
+- configuration/version of preprocessing
+- file list/checksums if the current artifact contract supports it
+- training-data transform version where relevant
+
+At load time, compare artifact/catalog compatibility where possible. Do not silently serve a model whose item mapping is incompatible with the live catalog.
+
+New runtime loaders should live in the recommender artifact layer rather than accumulating ad-hoc JSON parsing in application wiring.
+
+Heavy training-only dependencies should not force heavyweight models to be loaded inside the API process. The text encoder is an offline artifact-build dependency, not a runtime API dependency.
+
+Target artifact families:
+
+```text
+data/artifacts/
+  popularity/
+  als/
+  item_cf/
+  content/
+  source_similarity/
+```
+
+Exact file formats may be adjusted to repository conventions, but prefer compact NumPy/NPZ-style numeric artifacts over giant JSON arrays.
+
+---
+
+# 9. ALS collaborative-filtering candidate generator
+
+## 9.1 Offline model
+
+Train an implicit-feedback ALS model on `data/processed/interactions.parquet` after mapping stable `work_id` values to catalog items.
+
+Requirements:
+
+- use an established sparse/numerical implementation rather than hand-writing ALS
+- keep number of latent factors, regularization, iterations and confidence transform configurable
+- start with a practical factor count such as 64–128 and select defaults using offline evaluation
+- drop unresolved/out-of-catalog works safely and report counts
+- never join historical integer user IDs to application UUID users
+- persist item factors and training metadata; historical user factors are optional at serving time
+
+## 9.2 Live-user fold-in
+
+A live application user does **not** need to exist in the historical user matrix.
+
+On a fresh recommendation-batch request:
+
+1. construct the live user’s ALS preference vector from current durable evidence
+2. solve/recalculate a user latent factor against fixed trained item factors
+3. retrieve high-scoring eligible catalog items
+
+The global ALS model is **not** retrained when a user saves/rates a book.
+
+Initially, recompute the live user factor on each fresh first-page/batch generation. Persisted cursor pages already avoid new inference. Later, cache by `(user_id, profile_version, model_version)` only if profiling shows a need.
+
+Not Interested and already-known product exclusions remain enforced by application eligibility. Do not require negative ALS training to make those disappear.
+
+ALS candidate provenance should clearly identify the generator.
+
+---
+
+# 10. Item-item collaborative-filtering candidate generator
+
+Build a separate offline item-item CF artifact from historical interactions.
+
+Preferred initial method:
+
+- sparse item-item nearest neighbours
+- popularity-aware weighting such as BM25/TF-IDF or a clearly documented cosine baseline
+- configurable top-K neighbours per item (for example 100–200)
+- evaluate alternatives on a held-out historical interaction split before freezing defaults
+
+At runtime:
+
+- take positively interacted live-user seed books
+- weight seeds according to signal policy and recency where meaningful
+- retrieve precomputed neighbours
+- aggregate duplicate candidates while preserving strongest/combined evidence
+- exclude items according to the surface’s eligibility rules
+
+For Shelf discovery, seed primarily from books in the target shelf.
+
+For Similar Books, seed directly from the source book.
+
+User profile changes do not retrain the item-item model; they only alter which seed items and weights are used on the next fresh recommendation batch.
+
+---
+
+# 11. Semantic/content embedding artifact
+
+## 11.1 Default encoder
+
+Use a swappable encoder abstraction.
+
+Default V1 encoder:
+
+```text
+Qwen/Qwen3-Embedding-0.6B
+```
+
+Default output dimension: `512`, configurable.
+
+Reasons for the default:
+
+- strong general text retrieval/clustering model
+- multilingual
+- instruction-aware
+- supports user-defined embedding dimensions
+- small enough for an offline build workflow
+
+Do not hard-code Qwen-specific behavior into serving contracts. Record encoder name, pinned revision/identifier when possible, embedding dimension, normalization, prompt/instruction version, and text-template version in artifact metadata.
+
+Documents/books are embedded offline. The API must not load the 0.6B text model to serve recommendations.
+
+Use normalized embeddings so cosine retrieval can be implemented as dot products.
+
+For this catalog size (~92k books), exact batched matrix similarity is acceptable initially. Do not introduce pgvector, FAISS, a vector database, or a separate retrieval microservice unless profiling demonstrates a real need.
+
+## 11.2 Deterministic book text builder
+
+Implement a versioned `BookEmbeddingTextBuilder` / equivalent.
+
+Recommended structure:
+
+```text
+Title: ...
+Author: ...
+Genres: ...
+Themes/Tags: ...
+Description:
+...
+```
+
+Use:
+
+- title
+- primary author
+- description as the dominant free-text semantic field
+- broad genre information
+- a bounded, cleaned set of useful Goodreads/catalog shelf tags
+
+Do not embed:
+
+- ratings/popularity counts as semantic text
+- ISBNs
+- page count
+- raw opaque IDs
+- other numeric quality/popularity fields that belong in ranking features
+
+Clean catalog shelf tags. Filter obvious bookkeeping/status/personal-library tags and cap the number per book. Prefer meaningful high-support thematic tags. Keep cleaning rules deterministic, testable and versioned.
+
+Store enough compact metadata alongside embeddings to support human-inspectable interest summaries: title, author, top genre, selected cleaned tags, and stable IDs.
+
+---
+
+# 12. Semantic user profile: explicit shelves + inferred interests
+
+Use **both** explicit shelf interests and inferred behavioral interests.
+
+They share the same embedding artifact and semantic retrieval engine; they are different query/profile strategies, not duplicated embedding systems.
+
+## 12.1 Explicit shelf profiles
+
+For each shelf, derive a normalized weighted semantic vector from the shelf’s member-book embeddings.
+
+Inputs can account for:
+
+- shelf membership
+- save timestamp / recency if configured
+- strong ratings on books in the shelf
+- shelf name/description only if a clean, separately-tested way of embedding them is implemented; do not require this in V1
+
+Use the target shelf profile as the dominant semantic query on Shelf discovery.
+
+On Home, individual shelf profiles may contribute separate candidate lists so one large interest does not wash out smaller curated interests.
+
+## 12.2 Inferred interest clusters
+
+Infer multiple coherent user interests from meaningful positive book interactions instead of relying on one global centroid.
+
+Candidate evidence can include:
+
+- onboarding taste seeds
+- saves
+- positive ratings
+- recent book opens at significantly lower long-term weight
+
+Cap the clustering input to a configurable strongest/recent subset (for example around 100 items) to bound runtime.
+
+Preferred V1 clustering approach:
+
+- normalized content embeddings
+- agglomerative/hierarchical clustering
+- cosine distance
+- distance/similarity threshold rather than fixed K
+- configurable minimum evidence/cluster size
+
+Do **not** force every user into the same number of interests.
+
+Fallback behavior:
+
+- 0 positive items: no inferred semantic interest profile
+- 1–2 items: use the individual books as query vectors
+- small/coherent profile: one cluster/global profile is acceptable
+- enough diverse evidence: multiple clusters
+- if thresholding yields only noise/singletons, fall back to a small set of strongest individual query books or one global weighted centroid rather than fabricating cluster structure
+
+For each valid cluster:
+
+- use a normalized weighted centroid as the default retrieval query
+- compute and retain the medoid/representative interacted book
+- record cluster weight based on evidence strength/recency, not just member count
+
+Keep centroid-vs-medoid retrieval configurable for future offline comparison.
+
+---
+
+# 13. Human-inspectable inferred interests
+
+Human inspectability is a required feature.
+
+Every inferred interest cluster must have a deterministic diagnostic representation separate from its raw embedding vector.
+
+Define a pure recommender-domain structure similar to:
+
+```python
+InterestClusterSummary(
+    interest_id: str,
+    label: str,
+    weight: float,
+    member_count: int,
+    representative_book_id: int,
+    member_book_ids: tuple[int, ...],
+    top_terms: tuple[str, ...],
+    top_genres: tuple[str, ...],
+    evidence_summary: ...,
+)
+```
+
+Requirements:
+
+- `label` must be deterministic and non-LLM-dependent in V1.
+- Build labels from top cleaned tags/genres plus the representative/medoid book when needed.
+- Example fallback label: `Interest around “The Left Hand of Darkness”`.
+- Preserve enough evidence to answer “why was this inferred as one interest?”
+- Do not expose or print raw high-dimensional vectors by default.
+
+Add a developer-facing inspection command, for example:
+
+```text
+make inspect-recommender-profile USERNAME=<name>
+```
+
+or an equivalent CLI consistent with the repository.
+
+Human-friendly output should show:
+
+- user/profile version
+- explicit shelves and their representative books/topics
+- inferred interest clusters
+- cluster labels
+- cluster weights
+- representative book
+- top tags/genres
+- member books with the raw signal that contributed them when practical
+
+Also support machine-readable JSON output if easy.
+
+The inspection path must reuse the **same profiling code** used by the live recommender. Do not create a second debug-only clustering implementation.
+
+If the existing recommendation-result diagnostics contract can safely carry compact interest-profile summaries without bloating every candidate row, persist useful audit metadata there or at request-level. Do not duplicate the full cluster object on every recommendation result merely for debugging.
+
+---
+
+# 14. Goodreads/source-similarity candidate generator
+
+Use the existing resolved `book_source_similarities` data.
+
+The import path already resolves similarities to items present in the application catalog and drops unresolved/out-of-catalog edges. Still validate this invariant during artifact build.
+
+Prefer exporting the graph to a recommender artifact so runtime inference remains database-free.
+
+Keep this generator semantically pure:
+
+- it represents source/Goodreads similarity edges
+- do not quietly mix same-author, same-genre or semantic KNN heuristics into this generator
+
+Same-author/genre relationships may be ranking features or separate content-derived logic, but provenance must remain interpretable.
+
+Runtime usage:
+
+- Similar Books: very strong generator
+- Shelf: aggregate source neighbours of target-shelf books
+- Home: optional lower-weight neighbours of strong/recent positive seeds
+
+---
+
+# 15. Popularity candidate generator and exploration
+
+Keep the existing popularity mechanism as:
+
+- universal fallback
+- cold-start source
+- small candidate source for Home
+- safety net when another artifact/generator is unavailable or produces too few eligible items
+
+Do not conflate popularity with exploration.
+
+Exploration is a downstream reranking policy that deliberately prevents the final Home feed from collapsing entirely into the dominant interest/popularity mode.
+
+Preserve the existing Bayesian-shrunk popularity approach unless evaluation finds a verified defect.
+
+---
+
+# 16. Candidate-generator abstraction
+
+Introduce a structural typed `CandidateGenerator` contract consistent with the existing recommender package style.
+
+A generator must not know about FastAPI or SQLAlchemy.
+
+Conceptually it receives:
+
+- immutable recommendation request/user/surface context
+- loaded artifact-backed dependencies supplied at construction
+- generator-specific configuration
+
+and returns a ranked list of candidates with:
+
+- `book_id`
+- raw generator score if meaningful
+- rank within generator
+- source/provenance identifier
+- optional compact generator diagnostics/reason context
+
+Generator failures should be isolated where practical. A non-essential generator failure should not necessarily destroy the whole pipeline if enough other sources and popularity fallback remain available.
+
+Do not hide missing required artifacts. Emit structured diagnostics/logging and follow the existing fallback policy.
+
+---
+
+# 17. Candidate union: weighted Reciprocal Rank Fusion
+
+Use weighted Reciprocal Rank Fusion (RRF) as the V1 cross-generator union/fusion strategy.
+
+Reason: ALS scores, cosine similarities, item-item similarities, graph ranks and popularity scores are not directly calibrated to the same scale.
+
+For candidate `i`:
+
+```text
+fusion_score(i) = Σ_g weight(surface,g) / (rrf_k + rank_g(i))
+```
+
+Use 1-based ranks consistently.
+
+Default `rrf_k` can start around `60`; centralize and tune it.
+
+Preserve, per candidate:
+
+- all candidate sources
+- rank from each contributing source
+- raw score from each source
+- RRF contribution from each source
+- total fusion score
+
+Deduplicate by canonical `book_id` without losing provenance.
+
+Generator quotas and RRF weights are surface configuration, not hard-coded inside generators.
+
+---
+
+# 18. V1 deterministic ranker
+
+Do **not** train a learned engagement ranker before the new click/open attribution data exists in sufficient quantity.
+
+Create a clean ranker interface now so it can later be replaced by a learned model.
+
+V1 should use deterministic/configurable features such as:
+
+- RRF fusion score
+- number of independent agreeing candidate generators
+- generator-specific rank/score features
+- semantic relevance to the current surface/query profile
+- collaborative relevance
+- popularity/quality prior
+- relationship to strong positive user evidence
+- negative semantic similarity / explicit negative evidence where appropriate
+- recency of the seed evidence where relevant
+- surface-specific coherence
+
+Do not use raw popularity as the dominant personalization score.
+
+Keep the scoring breakdown inspectable in diagnostics for development/evaluation.
+
+---
+
+# 19. Surface-specific reranking / UX diversity
+
+Reranking happens **inside** the recommendation engine before the authoritative ordered result leaves the package.
+
+Use a simple deterministic greedy/MMR-like strategy rather than a complex learned reranker in V1.
+
+Possible penalties/constraints:
+
+- semantic near-duplicates
+- repeated same author
+- repeated series where detectable
+- excessive concentration in one inferred interest
+- excessive concentration from one candidate source
+- very similar adjacent results
+
+Possible positive coverage goals:
+
+- represent multiple strong user interests on Home
+- reserve a small amount of controlled exploration
+- preserve highly relevant items even if they are popular
+
+Surface strength:
+
+### Home
+
+Strongest diversity/exploration policy. Broad discovery is the goal.
+
+### Shelf
+
+Moderate/light diversity. Coherence with the target shelf is more important than broad topic diversity.
+
+### Similar Books
+
+Very light diversity. Similarity/relevance to the source book dominates; do not aggressively suppress same-author items if they are genuinely relevant.
+
+All reranking tunables live in surface configuration.
+
+---
+
+# 20. Surface configurations
+
+Implement one reusable pipeline with typed per-surface configuration.
+
+## 20.1 Home / All
+
+Goal: broad personalized discovery across the user’s interests.
+
+Candidate sources, rough relative priority:
+
+- ALS live-user fold-in: HIGH
+- item-item CF from strong positive seeds: HIGH
+- semantic inferred-interest clusters: HIGH
+- semantic explicit shelf profiles: HIGH
+- Goodreads/source neighbours from strong seeds: LOW/MEDIUM
+- popularity: LOW but guaranteed safety/cold-start source
+
+Future session generator: HIGH when later introduced and when enough current-session evidence exists.
+
+Home reranking should intentionally cover multiple interests and prevent repetitive author/topic blocks.
+
+## 20.2 Shelf discovery
+
+Goal: extend the **target shelf**, not the user’s entire global taste.
+
+Candidate sources:
+
+- semantic target-shelf profile: VERY HIGH
+- item-item CF seeded by target-shelf books: HIGH
+- ALS fold-in using target-shelf books as a pseudo-user: MEDIUM/HIGH
+- Goodreads/source neighbours of target-shelf books: MEDIUM
+- global-user ALS/semantic profile: very weak or fallback-only
+- popularity: fallback
+
+Other-shelf books remain eligible according to the existing domain rule.
+
+## 20.3 Similar Books
+
+Goal: books genuinely related to the current source book.
+
+Candidate sources:
+
+- Goodreads/source graph: VERY HIGH
+- item-item CF neighbours of source book: HIGH
+- semantic nearest neighbours of source book: HIGH
+- popularity: emergency fallback only
+
+Global user personalization should be absent or only a tiny tie-break feature. Do not transform this surface into “more books you may like.”
+
+---
+
+# 21. Reasons, provenance and diagnostics
+
+Keep recommendation explanations truthful.
+
+A user-facing reason must correspond to real evidence, not whichever reason string is convenient.
+
+Examples:
+
+- “Similar to books you saved” only if a saved-book-derived generator/ranking signal materially contributed.
+- “Similar to this book” on Similar Books when content/CF/source similarity supports it.
+- “Popular with readers” only for genuine popularity/fallback provenance.
+
+Preserve plural `candidate_sources` through the pipeline and persistence.
+
+Development diagnostics should make it possible to inspect:
+
+- generator ranks/raw scores
+- RRF contributions
+- ranker feature breakdown
+- reranking penalties/coverage decisions
+- fallback use
+- artifact/model versions
+- interest cluster/profile summaries when relevant
+
+Do not put huge diagnostics blobs on every result in production by default. Use a sensible compact/feature-flagged approach consistent with existing models.
+
+---
+
+# 22. Session-aware recommendation: prepare, do not overbuild
+
+This implementation must collect the data needed for a future session candidate generator:
+
+- browsing `session_id`
+- `book_opened`
+- recent saves/ratings with session attribution
+- meaningful submitted search queries
+- search → open attribution
+
+Do not implement SASRec, GRU4Rec, Transformers, or another learned sequential model in V1.
+
+If a lightweight session generator is added later, its first version should reuse existing artifacts:
+
+- recency-weighted recent opened/saved books
+- semantic session vector
+- item-item neighbours of recent session items
+
+No new learned sequence model is required until sufficient real ordered session data exists.
+
+---
+
+# 23. Offline evaluation
+
+Do not choose hyperparameters blindly when a simple offline comparison is possible.
+
+## 23.1 CF evaluation
+
+Historical data has no timestamps, so use a documented per-user random/stratified holdout rather than pretending it is temporal.
+
+Evaluate at least:
+
+- Recall@K
+- NDCG@K
+- MAP/Precision@K where practical
+- catalog coverage
+- popularity concentration/bias
+
+Compare sensible ALS settings and item-item cosine/TF-IDF/BM25 variants if implementation cost is low.
+
+Persist evaluation configuration and summary metrics alongside build reports, not in serving artifacts if that would bloat them.
+
+## 23.2 Content/source evaluation
+
+There is no perfect ground-truth semantic label set.
+
+Use a combination of:
+
+- recovery/overlap with resolved Goodreads similarity edges as a noisy proxy
+- nearest-neighbour qualitative samples
+- author/genre/tag coherence diagnostics
+- human inspection of inferred user-interest profiles
+
+Do not overfit semantic embeddings to the Goodreads graph; it is only one imperfect source.
+
+---
+
+# 24. Runtime efficiency
+
+Constraints to respect:
+
+- provider timeout is approximately 5 seconds; normal pipeline inference should be far below it
+- first-page generation produces the persisted full batch; cursor pages must not rerun inference
+- target final batch is currently 60 items
+- models/artifacts are loaded once per process
+- multiple API workers may each construct their own provider/model objects
+- avoid giant Python object graphs when a memory-mapped/compact numerical array works
+
+For normalized content embeddings, batch all semantic query vectors into one matrix multiply where practical instead of scanning the catalog separately in Python loops.
+
+Candidate generators should usually retrieve more than the final 60 (surface/configurable quotas), then fusion/ranking/reranking reduce to the authoritative final batch.
+
+No premature distributed retrieval infrastructure.
+
+---
+
+# 25. Dependencies
+
+Runtime recommender dependencies should remain modest.
+
+Likely numerical runtime dependencies:
+
+- NumPy
+- SciPy only where actually required
+
+Build/training dependencies may include:
+
+- `implicit` for ALS and item-item CF
+- `sentence-transformers` / compatible transformers stack for offline embeddings
+- scikit-learn for clustering/evaluation if used
+
+Structure dependency groups so the production API does not need to load the text encoder just because embeddings were built with it.
+
+Pin/lock through the existing uv workspace. Do not manually edit the lock file.
+
+---
+
+# 26. Configuration
+
+Create typed, centralized recommender configuration.
+
+Keep at least these categories separate:
+
+- training/preprocessing config
+- artifact/model versions
+- live signal weights
+- candidate quotas
+- per-surface RRF weights
+- ranking feature weights
+- diversity/reranking parameters
+- interest-clustering thresholds/bounds
+
+Do not convert every tuning parameter into an environment variable. Stable model/pipeline defaults belong in typed config/code; deployment-specific artifact/provider selection belongs in application settings.
+
+Configuration must be serializable into build metadata so an artifact can be reproduced.
+
+---
+
+# 27. Failure and fallback behavior
+
+Preserve graceful degradation.
+
+Examples:
+
+- ALS artifact absent: remaining generators can still run; record diagnostics
+- semantic artifact absent: CF/source/popularity still work
+- source graph empty for a book: Similar uses item-CF + semantic
+- all personalized generators empty: popularity
+- cold user skipped onboarding: popularity with Home diversity
+- one generator raises unexpectedly: do not return invalid duplicates/excluded items; either isolate generator failure or trigger existing provider fallback depending on severity
+
+Never return excluded/inactive/unknown books merely to fill the batch.
+
+---
+
+# 28. Tests and acceptance criteria
+
+The implementation is incomplete until critical tests exist.
+
+At minimum cover:
+
+## Interaction/attribution
+
+- browsing-session generation/rotation behavior
+- `book_opened` persistence
+- recommendation attribution propagation
+- search query logging only for submitted searches
+- search → open attribution
+- idempotent repeated recommendation impression/page fetch
+
+## Context
+
+- multi-shelf membership preserved
+- save timestamps preserved
+- profile version changes on long-term preference mutations
+- profile version does not change on passive impressions
+- Not Interested/rating domain constraints preserved
+
+## Artifacts
+
+- stable `work_id` mapping
+- unresolved items dropped/reported
+- incompatible catalog/artifact rejected or degraded safely
+- corrupt/missing artifact fallback
+- no ORM/FastAPI imports in recommender package
+
+## Generators
+
+- ALS fold-in changes when user preferences change without retraining global item factors
+- item-item seed weighting/dedup
+- semantic exact retrieval excludes ineligible items
+- explicit shelf profiles and inferred interest profiles produce separate query provenance
+- source-similarity artifact contains only catalog-resolved items
+- popularity fallback works
+
+## Interest inspectability
+
+- deterministic clustering for fixed inputs/config
+- deterministic labels/top terms
+- fallback for too few/no clear clusters
+- inspection CLI uses live profiling implementation
+
+## Fusion/ranking/reranking
+
+- weighted RRF deterministic
+- multi-source provenance retained
+- surface configs genuinely differ
+- Home diversity stronger than Shelf/Similar
+- final order stable/deterministic for same request/profile/artifacts/config
+- no duplicate/excluded candidates
+
+## End-to-end
+
+- Home produces personalized results for seeded user
+- Shelf recommendations respond to shelf contents rather than global profile alone
+- Similar Books responds to source book and uses existing similarity graph when present
+- new user with taste seeds immediately receives personalized candidates
+- skipped onboarding has sensible fallback
+- persisted cursor pages do not rerun inference
+
+Run and keep passing the repository’s existing test, lint, typecheck, migration and API-client generation workflow.
+
+---
+
+# 29. Explicit non-goals for this V1
+
+Do not add unless required to fix a verified blocker:
+
+- microservices
+- Redis/Celery/Kafka/RabbitMQ/Kubernetes
+- vector database / pgvector
+- FAISS/ANN service for the 92k catalog
+- online model training
+- learned neural ranker
+- learned sequence/session model
+- viewport impressions
+- dwell/hover/scroll/mouse instrumentation
+- semantic rewrite of lexical search
+- recommendation algorithms inside API routes
+- database access from the recommender package
+
+---
+
+# 30. Definition of done
+
+The recommender work is done when:
+
+1. mock recommendation logic is no longer the normal configured serving path;
+2. five candidate-generator families are implemented and artifact-backed where appropriate;
+3. user behavior instrumentation supports future evaluation/session work;
+4. Home, Shelf and Similar use deliberate different surface configurations;
+5. cold-start onboarding is optional and functional;
+6. inferred semantic interests are multi-interest and human-inspectable;
+7. candidate fusion, deterministic ranking and surface-specific reranking are implemented;
+8. artifacts are versioned/mapped safely with `work_id` durability;
+9. popularity remains a robust fallback;
+10. tests, lint, type checks and migrations pass;
+11. documentation/ADRs describe the final architecture and tuning defaults;
+12. a developer can inspect a user’s inferred interests and recommendation provenance without reading raw embedding vectors.

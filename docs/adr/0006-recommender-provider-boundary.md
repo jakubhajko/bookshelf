@@ -4,6 +4,17 @@
 
 Accepted (approved in `APP_SPECIFICATION.md` §10, §20 before implementation started).
 
+**Partly superseded by ADR-0013 (Recommender Phase 0):** the scope
+limitation below — that building the real recommendation funnel is out of
+scope — no longer holds. The funnel is now in scope and is being built
+*behind* this boundary. Everything else in this ADR remains live and
+binding: the provider/engine protocols, the discriminated-union typed
+contexts, application-owned eligibility, defensive result validation,
+authoritative engine ordering, and `packages/recommender`'s freedom from
+FastAPI/ORM imports. The rejected alternative "build the real
+recommendation funnel now" is retained as historical context recording why
+the boundary existed before the pipeline did.
+
 ## Context
 
 The full recommendation system (candidate generation, union/dedup, ranking,

@@ -21,7 +21,8 @@ application; `data/notebooks/build_dataset.ipynb` consumes it to produce `proces
 
 ## `processed/`
 
-The canonical, work-deduplicated dataset described in `APP_SPECIFICATION.md` §7.
+The canonical, work-deduplicated dataset described in `APP_SPECIFICATION.md` §7
+(now at `archive_of_structural_prompts/app_building_prompts/`).
 This is what the Phase 2 import adapter reads — never the contents of `raw/`.
 
 - `books.parquet` — 92,526 rows, one per canonical work, 39 columns, unique

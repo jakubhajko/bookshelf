@@ -4,13 +4,25 @@ A logged-in, Pinterest-inspired book discovery application: masonry home
 feed, search, ratings, Not Interested, shelves, and shelf-lens/similar-book
 recommendations — built as a modular monolith (FastAPI + PostgreSQL +
 React/TypeScript) with an independent, typed recommender package standing in
-front of mock/popularity providers today and the real recommendation funnel
-later.
+front of mock/popularity providers today and the modular recommendation
+funnel now being built behind the same boundary (ADR-0013).
 
-`APP_SPECIFICATION.md` is the full product/engineering source of truth.
-`CLAUDE.md` carries the persistent implementation rules. Current build state,
-phase-by-phase, lives in [`docs/implementation/plan.md`](docs/implementation/plan.md);
-architectural decisions are recorded as ADRs in [`docs/adr/`](docs/adr/).
+## Specifications
+
+- [`archive_of_structural_prompts/app_building_prompts/APP_SPECIFICATION.md`](archive_of_structural_prompts/app_building_prompts/APP_SPECIFICATION.md)
+  — the full product/engineering source of truth for application behavior.
+  Written and delivered against from the repository root; relocated into
+  `archive_of_structural_prompts/` once the application phases completed.
+  Its content is unchanged and it remains authoritative for non-recommender
+  product behavior.
+- `RECOMMENDER_SPECIFICATION.md` — authoritative for recommender work,
+  sequenced by `RECOMMENDER_IMPLEMENTATION_PLAN.md`.
+- `CLAUDE.md` — persistent implementation rules and the precedence order
+  between the above.
+
+Current build state, phase by phase, lives in
+[`docs/implementation/plan.md`](docs/implementation/plan.md); architectural
+decisions are recorded as ADRs in [`docs/adr/`](docs/adr/).
 
 ## Repository layout
 

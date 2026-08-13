@@ -1,9 +1,26 @@
 # Implementation plan
 
 Status: living document, updated after every phase.
-Source of truth: `APP_SPECIFICATION.md`. This plan does not restate product
-rationale — see the spec for that. It tracks what exists, what's missing, and
-what to run to prove each phase.
+
+This plan does not restate product rationale — see the specifications for
+that. It tracks what exists, what's missing, and what to run to prove each
+phase.
+
+**Two phase sequences are tracked here.** Phase numbers are meaningless
+unqualified; always say which sequence.
+
+| Sequence | Source of truth | Phases | State |
+|---|---|---|---|
+| **Application** (§3) | `APP_SPECIFICATION.md` §18 | 0-9 | complete |
+| **Recommender** (§3R) | `RECOMMENDER_SPECIFICATION.md`, sequenced by `RECOMMENDER_IMPLEMENTATION_PLAN.md` | 0-9 | Phase 0 done |
+
+`APP_SPECIFICATION.md` now lives at
+`archive_of_structural_prompts/app_building_prompts/APP_SPECIFICATION.md`
+(relocated after the application phases completed; content byte-identical to
+the version that was at the repository root throughout Phases 0-9). It
+remains authoritative for non-recommender product behavior. Every `spec §N`
+reference in §1-§3 and §5-§6 below means that document; recommender sections
+name their specification explicitly.
 
 ---
 
@@ -75,9 +92,10 @@ repository. Rather than enumerate every missing file, the phased plan below
 closes Phase 0 (this document + ADRs) and Phase 1 (foundations) only, per
 `BUILD_PROMPT.md`.
 
-## 3. Phased implementation plan
+## 3. Application phased implementation plan
 
-Phases mirror spec §18 exactly. Status is updated as work lands.
+Phases mirror spec §18 exactly. Status is updated as work lands. This
+sequence is **complete**; the active sequence is §3R.
 
 ### Phase 0 — Inspect and plan — **done, this pass**
 
@@ -953,6 +971,236 @@ Phases mirror spec §18 exactly. Status is updated as work lands.
   documented gap in `useBookState.ts`); a fix for the `page-has-heading-one`
   finding on Home (risk #67); Docker runtime verification (risk #1/#65).
 
+## 3R. Recommender phased implementation plan
+
+Source of truth: `RECOMMENDER_SPECIFICATION.md`, sequenced by
+`RECOMMENDER_IMPLEMENTATION_PLAN.md`. Section references written as
+`rec-spec §N` mean the former. One phase per pass; each phase leaves the
+repository valid, tested and resumable.
+
+| Phase | Scope | Status |
+|---|---|---|
+| R0 | Reconcile, baseline, lock architectural decisions | **done, this pass** |
+| R1 | Interaction instrumentation, attribution, impression correctness | not started |
+| R2 | Rich user context, profile version, cold-start taste seeds | not started |
+| R3 | Artifact substrate, data validation, source-similarity export | not started |
+| R4 | CF artifacts: ALS + item-item | not started |
+| R5 | Content embeddings, multi-interest profiling, human inspection | not started |
+| R6 | Candidate-generator framework and the five generators | not started |
+| R7 | Surface config, weighted RRF, deterministic ranking, UX reranking | not started |
+| R8 | Pipeline engine integration, cold-start UI, serving switch | not started |
+| R9 | Evaluation, performance hardening, diagnostics, documentation | not started |
+
+### Phase R0 — Reconcile, baseline and lock architectural decisions — **done, this pass**
+
+Goal: prepare the repository for recommender implementation **without
+changing any recommendation behavior**. No models, no generators, no schema
+changes. Nothing in `packages/recommender` or
+`modules/recommendations` was modified.
+
+#### R0 checklist
+
+- [x] Read the live recommender boundary, provider/engine contracts,
+  `FuturePipelineRecommendationEngine`, artifact code, recommendation
+  service/transaction boundary, eligibility, persistence, context builder,
+  `interaction_events`, shelves, search, frontend recommendation cards and
+  settings — rather than trusting the architectural investigation.
+- [x] Verify the codebase still matches what `RECOMMENDER_SPECIFICATION.md`
+  §2 assumes it preserves (it does — see "Verified intact" below).
+- [x] Identify and preserve uncommitted user changes (the root-document
+  reorganization and the `CLAUDE.md` rewrite; both left in place, nothing
+  reverted, no destructive git command run).
+- [x] Add ADRs for the seven decisions that materially change the previous
+  architecture/scope (ADR-0013 … ADR-0019) and amend ADR-0006's status.
+- [x] Reconcile root docs so no active instruction still says the funnel is
+  out of scope or that there is no next phase.
+- [x] Add this checklist and the R1-R9 phase table to this document.
+- [x] Restore a green baseline (`make test` / `lint` / `typecheck`).
+
+#### Verified intact (matches rec-spec §2, confirmed against live code)
+
+- `packages/recommender` has zero FastAPI/SQLAlchemy imports; the hygiene
+  test (`tests/test_package_boundaries.py`) still enforces it.
+- `RecommendationProvider`/`RecommendationEngine` protocols, the
+  discriminated-union `SurfaceContext`, and the deliberately-distinct
+  engine-level vs provider-level request types are all as ADR-0006 records.
+- `FuturePipelineRecommendationEngine` exists and raises `EngineError`
+  clearly rather than fabricating data — the plug point is real and unused.
+- `InProcessProvider` + `FallbackProvider` implement spec §10.10's chain,
+  including the correct skip when popularity is already the primary.
+- `modules/recommendations/service.py` commits (ends) the read transaction
+  before `await provider.recommend(...)` and re-validates every returned
+  candidate against `get_catalog_cards` before persisting — ADR-0007's hard
+  ordering constraint holds in the live code.
+- Persisted batches, `(request_id, position)` ordering, opaque cursors, and
+  the existence-hiding `RECOMMENDATION_CURSOR_INVALID` path are intact.
+- `ArtifactManifest` carries the `book_id`/`work_id`/`model_item_index`
+  triple plus model/catalog version and `trained_at`.
+- Application-owned eligibility (`eligibility.py`) is pure, outside the
+  recommender package, and passed in as hard exclusions.
+- `data/processed/books.parquet` (92,526 rows) and `interactions.parquet`
+  (775,090 rows, `user_id`/`work_id`/`rating`/`is_explicit`, no timestamps)
+  are present as documented.
+- `book_source_similarities` holds 269,276 catalog-resolved edges from the
+  Phase 2 import.
+
+#### Drift and gaps found (each is a later phase's input, none fixed here)
+
+1. **Root-document reorganization broke two tests.**
+   `APP_SPECIFICATION.md`, `BUILD_PROMPT.md` and
+   `RECOMMENDER_CODEBASE_REPORT.md` were moved into
+   `archive_of_structural_prompts/` (archived `APP_SPECIFICATION.md`
+   verified byte-identical to the deleted root copy). Two backend tests
+   used root `APP_SPECIFICATION.md` as the sentinel proving a hardcoded
+   `parents[N]` repo-root index still resolves correctly, so both failed.
+   **Fixed this phase** — see "Changed files". The sentinel is now the
+   workspace's structural markers (`Makefile`, root `pyproject.toml`,
+   `apps/`, `packages/`), which change only when the thing being asserted
+   really does. This is the *only* code change in R0.
+2. **This document contradicted `CLAUDE.md`.** §7 read "Next phase:
+   **None**" and stated the funnel was permanently out of scope.
+   Reconciled this phase (ADR-0013).
+3. **ADR-0006 recorded the funnel as out of scope** as a live decision.
+   Status amended to point at ADR-0013; its boundary decision is untouched
+   and still binding.
+4. **Impression writes are not idempotent — a live defect.**
+   `recommendations/repository.py::create_impressions` is a plain
+   `session.add_all` into a table with
+   `UNIQUE(request_id, book_id)` (`uq_recommendation_impressions_*`).
+   Re-fetching a persisted cursor page — an ordinary client behavior under
+   ADR-0007 — will violate it. Not fixed here (R0 changes no behavior);
+   this is R1's first backend task, and impression data cannot be trusted
+   until it is. rec-spec §4.5.
+5. **All six `interaction_events` attribution columns have zero writers.**
+   `surface`, `session_id`, `recommendation_request_id`, `search_query_id`,
+   `source_book_id`, `rank_position` exist and are correctly typed;
+   `interactions/service.py` accepts no attribution arguments whatsoever.
+   The schema barely changes in R1 — the write paths do.
+6. **`shelf_books.source_surface` is plumbed but never supplied.** The
+   column exists, `shelves/service.py::add_book_to_shelf` and
+   `repository.py` both accept `source_surface`, and every caller omits it.
+7. **No `book_opened` event type.** `EventType` has the seven Phase 4
+   members only. rec-spec §4.2 needs an eighth plus a dedicated write
+   endpoint; `GET /books/{id}` must stay side-effect free.
+8. **No `search_queries` table** and no submitted-search persistence.
+   `modules/search` is read-only (ADR-0012), which is correct — R1 adds an
+   explicit write path rather than side effects on the debounced GET.
+9. **`UserContext` is thinner than rec-spec §5 requires.** It has global
+   `saved_book_ids` but no per-shelf membership, no `added_at`, no taste
+   seeds, and `RecentInteractionSnapshot` carries only
+   `event_type`/`book_id`/`occurred_at` — dropping the shelf/session/
+   attribution fields R1 starts populating. `profile_version` is declared
+   and optional, and **no producer sets it** (R2).
+10. **Popularity artifact parsing lives in application wiring.**
+    `wiring.py::_load_popularity_engine` reads `manifest.json` and
+    `scores.json` inline. Correct for one artifact of one shape; does not
+    generalize to five families (ADR-0014 — R3 moves loading into the
+    recommender artifact layer).
+11. **No source-similarity artifact export.** The 269,276 resolved edges
+    are PostgreSQL-only, so nothing can use them without a database read
+    during inference, which ADR-0014 forbids (R3).
+12. **No numerical/ML dependencies anywhere in the workspace.** No NumPy,
+    SciPy, `implicit`, `scikit-learn` or `sentence-transformers` in the
+    root, `apps/api` or `packages/recommender` manifests. Every artifact
+    family lands with its dependency group (R3-R5), and the text encoder
+    must stay out of the API runtime set (ADR-0018).
+13. **`interactions.parquet` is read by nothing.** Present since Phase 2
+    and deliberately never imported into PostgreSQL (historical users are
+    not application users). R4 is its first consumer.
+14. **The frontend preserves no recommendation attribution.**
+    `RecommendationPageResponse` already returns `request_id`, and each
+    item already carries its `rank` — but `routes/Home.tsx` reads neither,
+    and nothing carries them into card actions or detail navigation. The
+    API-side data needed for attribution is already there; the propagation
+    is not (R1/R8).
+15. **`ArtifactManifest.item_mapping` is a full tuple of per-item models.**
+    Fine for a manifest listing ~92k popularity entries once at startup;
+    a Pydantic object per catalog item per artifact family will not scale
+    to five. R3 should validate this against real load times rather than
+    assume either way.
+
+#### Decisions locked (ADRs added this phase)
+
+| ADR | Decision |
+|---|---|
+| [0013](../adr/0013-recommendation-funnel-in-scope.md) | The modular recommendation funnel is in scope; supersedes ADR-0006's scope limitation only |
+| [0014](../adr/0014-artifact-backed-recommender-runtime.md) | Artifact-backed runtime, no DB access from the engine, `work_id` durability, compact NumPy artifacts |
+| [0015](../adr/0015-raw-events-and-attribution.md) | Raw events + optional typed attribution; no universal preference score; impression ≠ negative |
+| [0016](../adr/0016-multi-interest-semantic-profiling.md) | Explicit shelf profiles **and** threshold-based inferred interest clusters; human inspectability required |
+| [0017](../adr/0017-rrf-fusion-deterministic-ranker-surface-reranker.md) | Weighted RRF union, deterministic V1 ranker, surface-specific reranker |
+| [0018](../adr/0018-offline-swappable-text-embeddings.md) | Offline swappable encoder (Qwen3-Embedding-0.6B, dim 512, normalized); exact batched retrieval |
+| [0019](../adr/0019-cold-start-taste-seeds-as-domain-state.md) | Taste seeds are their own domain state, never ratings or shelf saves |
+
+ADR-0006's Status section was amended to record the partial supersession.
+Its Decision and Consequences remain live and binding.
+
+#### Changed files (R0)
+
+- `apps/api/tests/test_artifact_paths.py`,
+  `apps/api/tests/test_covers.py` — repo-root sentinel switched from
+  `APP_SPECIFICATION.md` to structural workspace markers; tests renamed
+  from `test_repo_root_actually_contains_the_app_specification` to
+  `test_repo_root_index_points_at_the_real_repo_root`. Only code change in
+  this phase.
+- `docs/adr/0013`…`0019` — new.
+- `docs/adr/0006-recommender-provider-boundary.md` — Status amended.
+- `docs/implementation/plan.md` — header (two phase sequences, spec
+  relocation), §3 retitled, this §3R added, §7 rewritten.
+- `README.md` — new "Specifications" section pointing at the relocated
+  `APP_SPECIFICATION.md`, `RECOMMENDER_SPECIFICATION.md` and the
+  precedence rules; funnel described as in progress rather than deferred.
+- `data/README.md` — relocated-spec pointer.
+
+#### Commands run (R0)
+
+```bash
+# Baseline, before any edit — the two failures below are caused by the
+# root-document relocation, nothing else:
+make test        # 2 failed, 125 passed (apps/api unit)
+make lint        # clean
+make typecheck   # clean
+
+# After the sentinel fix:
+cd apps/api && uv run pytest tests/test_artifact_paths.py tests/test_covers.py
+                 # 10 passed
+make test        # see §5i
+make lint        # see §5i
+make typecheck   # see §5i
+```
+
+No migration, API-client or e2e command was run: R0 changes no schema, no
+OpenAPI surface and no frontend behavior.
+
+#### R0 acceptance
+
+- [x] Architecture contradictions removed or documented.
+- [x] Existing tests pass (and the two that were failing on arrival now do).
+- [x] No recommendation behavior changed — no file under
+  `packages/recommender/src` or
+  `apps/api/src/book_app/modules/recommendations/` was touched.
+
+### Phases R1-R9 — not started
+
+Scope, tasks and per-phase acceptance criteria live in
+`RECOMMENDER_IMPLEMENTATION_PLAN.md` and are not duplicated here. Each phase
+appends its own record to this section as it lands, in the same shape as R0
+above: checklist, drift found, decisions/ADRs, changed files, commands run
+with real results, and unresolved risks appended to §6.
+
+Standing constraints for every recommender phase (from `CLAUDE.md` and
+rec-spec §2, restated because they are the ones easiest to violate
+accidentally while adding models):
+
+- no FastAPI/ORM imports in `packages/recommender`;
+- no PostgreSQL access during inference, and no open transaction while it
+  runs;
+- `work_id` is the durable identity — PostgreSQL `book_id` is not;
+- engine order is authoritative and nothing downstream re-sorts it;
+- popularity stays a working fallback at every step;
+- missing/corrupt artifacts degrade, never fail startup;
+- tunables stay centralized and typed, not scattered as literals;
+- tests land with the phase, not after it.
+
 ## 4. Acceptance checklist
 
 Mirrors spec §19, grouped the same way. Checked items are true today; this
@@ -1481,6 +1729,44 @@ a real backend) was authored and is believed correct by inspection and by
 running the equivalent steps manually in this environment, but GitHub
 Actions itself was not invoked from here to confirm it goes green — that
 will only be known once this branch's CI actually runs.
+
+## 5i. Recommender Phase R0 validation commands and results
+
+```bash
+# Baseline, run BEFORE any edit, to establish what was already broken.
+make test
+# apps/api: 2 failed, 125 passed
+#   FAILED tests/test_artifact_paths.py::test_repo_root_actually_contains_the_app_specification
+#   FAILED tests/test_covers.py::test_repo_root_actually_contains_the_app_specification
+# Both caused solely by APP_SPECIFICATION.md being relocated out of the
+# repository root — the sentinel file, not the path logic, was what moved.
+# `make test` stops at the first failing suite, so packages/recommender and
+# apps/web were not reached on this run.
+
+make lint        # clean: apps/api, packages/recommender, tests/, apps/web
+make typecheck   # clean: 115 + 26 source files, apps/web tsc -b --force
+
+# The fix (the only code change in R0), verified in isolation first:
+cd apps/api && uv run pytest tests/test_artifact_paths.py tests/test_covers.py -q
+# 10 passed
+
+# Full re-run after all R0 edits:
+make test
+# apps/api        127 passed
+# packages/recommender  38 passed
+# apps/web        73 passed (21 files)
+make lint        # clean: apps/api, packages/recommender, tests/, apps/web
+make typecheck   # clean: 115 + 26 source files, apps/web tsc -b --force
+```
+
+Result after R0: `make test` green across all three suites — 127 apps/api
+unit (the same 125 as the baseline plus the 2 that were failing on arrival),
+38 recommender, 73 frontend. `make lint` and `make typecheck` clean.
+Integration tests and e2e were **not** run this phase — R0 changes no
+schema, no query, no route, no OpenAPI surface and no frontend code, so
+neither suite has anything new to exercise; both remain as last verified in
+§5h. No migration was created and `make generate-api-client` was not run,
+for the same reason.
 
 ## 6. Risks and assumptions
 
@@ -2283,27 +2569,83 @@ conservative, reversible default and document it."
     shifted their colour. The artwork's blue is #4c6fd7, which is exactly
     `--color-accent`.
 
+### Recommender Phase R0
+
+78. **Twelve documents still reference `APP_SPECIFICATION.md` by its old
+    root path.** Ten are ADRs (0001-0010), which are deliberately left
+    alone: an ADR is a record of what was decided and against what, at a
+    point in time, and rewriting paths inside them would edit history to
+    match the present. The two documents that are *read as current
+    instructions* — `README.md` and this plan — now point at
+    `archive_of_structural_prompts/app_building_prompts/`. The residual
+    risk is a future reader following an ADR's path and finding nothing;
+    mitigated by both entry-point documents naming the new location. If it
+    proves annoying in practice, a one-line pointer file at the old path
+    is the cheap fix, not a mass rewrite.
+79. **Non-idempotent recommendation-impression writes are a live defect in
+    shipped code, not merely a missing feature.** `create_impressions`
+    inserts unconditionally into a table with `UNIQUE(request_id, book_id)`,
+    so a client re-fetching a persisted cursor page can trigger a 500. R0
+    deliberately did not fix it — R0's acceptance criterion is that no
+    recommendation behavior changes — but it means impression data is
+    untrustworthy *and* a real user-facing failure exists until R1's first
+    task lands. This is the strongest argument for R1 being next and not
+    being skipped or reordered.
+80. **`ArtifactManifest.item_mapping` may not scale to five artifact
+    families.** It is a `tuple[ArtifactItemMapping, ...]` — one frozen
+    Pydantic model per catalog item. At ~92k items that is one large object
+    graph per artifact, constructed at provider build time. It is fine
+    today with a single popularity artifact and was never a problem worth
+    solving before now. R3 should measure real load time and memory with
+    several artifacts loaded rather than assume it is either fine or
+    broken; ADR-0014's "compact numerical arrays over object graphs"
+    principle points at parallel `.npy` id arrays if measurement says so.
+81. **The heavy offline ML dependencies have not been added yet, and the
+    workspace has never resolved them.** No NumPy, SciPy, `implicit`,
+    scikit-learn or `sentence-transformers` exists in any manifest, so it
+    is not yet known whether the transformer stack resolves cleanly in
+    this uv workspace on this platform, nor how long an embedding build
+    over 92,526 books actually takes here. R3-R5 carry that unknown. The
+    lock file must not be hand-edited (CLAUDE.md), and training-only
+    dependencies must land in a group the API runtime does not install
+    (ADR-0018).
+
 ## 7. Next phase
 
-**None — Phase 9 was the last phase in spec §18's own list.** The
-application is functionally complete against `APP_SPECIFICATION.md`: every
-Functional and Architecture bullet in spec §19 (§4 above) is checked, and
-every Quality bullet is checked except one — `docker compose up` is
-authored and reasoned through but not runtime-verified, because Docker has
-never been available in this environment across any phase (risk #1/#65).
-That single gap is environmental, not architectural: nothing in the
-application depends on Docker being present (ADR-0009), and closing it
-needs a Docker-capable environment to actually run `make up` in, not more
-code.
+**Recommender Phase R1 — interaction instrumentation, attribution and
+impression correctness.** Scope and acceptance criteria are in
+`RECOMMENDER_IMPLEMENTATION_PLAN.md`; the live gaps it consumes are
+recorded at §3R "Drift and gaps found" items 4-8 and 14. Its first backend
+task is the non-idempotent impression write (item 4) — a defect in shipped
+code, not new construction.
 
-Anything beyond this point is new scope, not a continuation of this plan —
-CLAUDE.md is explicit that "the full modular recommendation funnel is not"
-this project's scope, and spec §20 forbids replacing the architecture,
-adding infrastructure (Redis/Celery/Kafka/Kubernetes) this plan never
-needed, or building the final recommendation funnel regardless of how this
-phase went. If real usage surfaces a genuine gap (the `page-has-heading-one`
-finding at risk #67, the "list genres" endpoint at risk #62, the
-error-path half of the shelf-sync race at risk #68, S3-backed storage per
-ADR-0009's documented-but-not-built AWS mapping), each is small, scoped,
-and independently addressable without reopening this plan's phase
-structure — but none of them are "the next phase." There isn't one.
+R1 has not been started. Do not begin it as part of an R0 pass.
+
+### The application sequence is complete
+
+Phase 9 was the last phase in spec §18's own list. The application is
+functionally complete against `APP_SPECIFICATION.md`: every Functional and
+Architecture bullet in spec §19 (§4 above) is checked, and every Quality
+bullet is checked except one — `docker compose up` is authored and reasoned
+through but not runtime-verified, because Docker has never been available
+in this environment across any phase (risk #1/#65). That gap is
+environmental, not architectural: nothing in the application depends on
+Docker being present (ADR-0009), and closing it needs a Docker-capable
+environment to run `make up` in, not more code.
+
+**Correcting this section's own previous statement**, which read "Next
+phase: None … anything beyond this point is new scope" and cited CLAUDE.md
+as saying the modular recommendation funnel was out of scope. That was
+accurate when written and is not now: root `CLAUDE.md` and
+`RECOMMENDER_SPECIFICATION.md` put the funnel in scope, and ADR-0013
+records the change and what it does *not* reopen. The application
+specification's other prohibitions still stand in full — no microservices,
+no Redis/Celery/Kafka/Kubernetes, no vector database, no recommendation
+algorithms in routes, no database access from the recommender package.
+
+The small standing items that were never phases and still aren't: the
+`page-has-heading-one` finding (risk #67), a "list genres" endpoint
+(risk #62), the error-path half of the shelf-sync race (risk #68), and
+S3-backed storage per ADR-0009's documented-but-not-built AWS mapping.
+Each remains independently addressable without reopening either phase
+structure.

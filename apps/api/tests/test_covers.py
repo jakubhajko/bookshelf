@@ -75,9 +75,13 @@ def test_absolute_configured_path_passes_through_unchanged() -> None:
     assert resolve_cover_storage_root(absolute) == absolute
 
 
-def test_repo_root_actually_contains_the_app_specification() -> None:
+def test_repo_root_index_points_at_the_real_repo_root() -> None:
     """Confirms the hardcoded `parents[N]` index in core/covers.py still
     points at the real repo root, not some other ancestor directory — a
     future file move could silently break the index without this (same
-    check as `tests/test_artifact_paths.py`'s equivalent)."""
-    assert (_REPO_ROOT / "APP_SPECIFICATION.md").is_file()
+    check, and the same structural-marker rationale, as
+    `tests/test_artifact_paths.py`'s equivalent)."""
+    assert (_REPO_ROOT / "Makefile").is_file()
+    assert (_REPO_ROOT / "pyproject.toml").is_file()
+    assert (_REPO_ROOT / "apps").is_dir()
+    assert (_REPO_ROOT / "packages").is_dir()
