@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from book_app.modules.recommendations.models import (
@@ -96,14 +97,39 @@ def create_impressions(
     book_ids_and_positions: list[tuple[int, int]],
     page_cursor: str | None,
 ) -> None:
-    session.add_all(
-        RecommendationImpression(
-            request_id=request_id,
-            book_id=book_id,
-            rank_position=rank_position,
-            page_cursor=page_cursor,
-        )
-        for book_id, rank_position in book_ids_and_positions
+    """Idempotent by construction (rec-spec §4.5).
+
+    This was a plain ``add_all`` until recommender Phase R1, which made it
+    a live defect rather than a latent one: ADR-0007's persisted-batch
+    design means re-requesting the *same* cursor page is ordinary,
+    expected client behavior (a back-navigation, a retry, React Strict
+    Mode's double effect in development), and every one of those re-fetches
+    tried to insert a duplicate against
+    ``uq_recommendation_impressions_request_book`` and returned a 500.
+
+    ``ON CONFLICT DO NOTHING`` keeps the *first* delivery's row, which is
+    the truthful one: an impression means "this book was delivered in a
+    successful response" (spec §8.10), and the second delivery of an
+    already-recorded page is the same exposure, not a new one. Counting it
+    twice would inflate exposure data that ADR-0015 explicitly relies on
+    being trustworthy.
+    """
+    if not book_ids_and_positions:
+        return
+
+    stmt = pg_insert(RecommendationImpression).values(
+        [
+            {
+                "request_id": request_id,
+                "book_id": book_id,
+                "rank_position": rank_position,
+                "page_cursor": page_cursor,
+            }
+            for book_id, rank_position in book_ids_and_positions
+        ]
+    )
+    session.execute(
+        stmt.on_conflict_do_nothing(constraint="uq_recommendation_impressions_request_book")
     )
     session.flush()
 

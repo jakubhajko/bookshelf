@@ -9,6 +9,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from book_app.modules.interactions.attribution import InteractionAttribution
+
 
 class BookAuthorPublic(BaseModel):
     name: str
@@ -66,7 +68,26 @@ class PreferenceState(BaseModel):
 
 class RatingRequest(BaseModel):
     rating: float
+    #: Optional provenance (rec-spec §4.3). Omitted entirely by any caller
+    #: that doesn't know where the action came from — see
+    #: ``interactions.attribution``.
+    attribution: InteractionAttribution | None = None
 
 
 class ShelfSyncRequest(BaseModel):
     shelf_ids: list[UUID]
+    attribution: InteractionAttribution | None = None
+
+
+class NotInterestedRequest(BaseModel):
+    """Body for `PUT /books/{id}/not-interested`, which previously took
+    none. Optional as a whole (the route defaults it) so existing callers
+    that send no body keep working unchanged."""
+
+    attribution: InteractionAttribution | None = None
+
+
+class BookOpenedRequest(BaseModel):
+    """Body for `POST /books/{id}/opened` (rec-spec §4.2)."""
+
+    attribution: InteractionAttribution | None = None

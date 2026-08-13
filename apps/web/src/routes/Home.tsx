@@ -1,5 +1,6 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
+import type { SurfaceAttribution } from '../api/attribution'
 import { queryKeys } from '../api/queryKeys'
 import * as recommendationsApi from '../api/recommendations'
 import * as shelvesApi from '../api/shelves'
@@ -66,6 +67,15 @@ export function HomePage() {
 
   const items = data?.pages.flatMap((page) => page.items) ?? []
 
+  // Every page of this feed reads the *same* persisted batch (ADR-0007) —
+  // a cursor encodes the request id, so later pages come back carrying the
+  // first one's. One request id therefore attributes every item here, and
+  // each card contributes its own `rank` (rec-spec §4.3).
+  const attribution: SurfaceAttribution = {
+    surface: 'home',
+    recommendation_request_id: data?.pages[0]?.request_id,
+  }
+
   return (
     <div className="pb-10">
       <ShelfLensRow />
@@ -93,7 +103,9 @@ export function HomePage() {
           </div>
         )}
 
-        {!isLoading && items.length > 0 && <BookMasonryGrid items={items} />}
+        {!isLoading && items.length > 0 && (
+          <BookMasonryGrid items={items} attribution={attribution} />
+        )}
 
         <div ref={sentinelRef} className="h-1" />
         {isFetchingNextPage && (

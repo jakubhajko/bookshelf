@@ -51,7 +51,7 @@ export function ShelfBooksPage() {
 
   return (
     <div>
-      <BookMasonryGrid items={items} />
+      <BookMasonryGrid items={items} attribution={{ surface: 'shelf_books' }} />
       <div ref={sentinelRef} className="h-1" />
       {isFetchingNextPage && (
         <p className="py-4 text-center text-sm text-text-muted">Loading more…</p>

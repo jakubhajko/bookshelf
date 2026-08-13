@@ -73,7 +73,12 @@ describe('ShelfSelectorPopover', () => {
 
     await user.click(await screen.findByRole('checkbox', { name: 'To Read' }))
 
-    await waitFor(() => expect(booksApi.syncBookShelves).toHaveBeenCalledWith(1, ['s1']))
+    // Third argument is attribution (rec-spec §4.3) — `undefined` here
+    // because this popover is rendered without a surface context, which is
+    // the "origin unknown" case ADR-0015 requires to keep working.
+    await waitFor(() =>
+      expect(booksApi.syncBookShelves).toHaveBeenCalledWith(1, ['s1'], undefined),
+    )
   })
 
   it('offers to create a shelf that does not exist yet, then saves the book to it', async () => {
@@ -96,7 +101,9 @@ describe('ShelfSelectorPopover', () => {
     await user.click(screen.getByRole('button', { name: /Create.*Sci-Fi/ }))
 
     await waitFor(() => expect(shelvesApi.createShelf).toHaveBeenCalledWith('Sci-Fi'))
-    await waitFor(() => expect(booksApi.syncBookShelves).toHaveBeenCalledWith(1, ['s3']))
+    await waitFor(() =>
+      expect(booksApi.syncBookShelves).toHaveBeenCalledWith(1, ['s3'], undefined),
+    )
   })
 
   it('does not offer to create a shelf that already exists (case-insensitive)', async () => {

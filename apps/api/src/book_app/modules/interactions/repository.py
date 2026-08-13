@@ -15,6 +15,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from book_app.modules.books.models import Book, BookGenre, Genre
+from book_app.modules.interactions.attribution import NO_ATTRIBUTION, InteractionAttribution
 from book_app.modules.interactions.models import InteractionEvent, UserBookState
 from book_app.shared.text import normalize_for_uniqueness
 
@@ -54,13 +55,30 @@ def append_event(
     event_type: str,
     shelf_id: UUID | None = None,
     payload: dict[str, Any] | None = None,
+    attribution: InteractionAttribution = NO_ATTRIBUTION,
 ) -> InteractionEvent:
+    """The one place `interaction_events`' six attribution columns are
+    written (ADR-0015). They have existed, correctly typed and fully
+    indexed, since Phase 4 with no writer at all; routing every event
+    through this signature is what makes them real without each caller
+    knowing the column list.
+
+    `attribution` defaults to empty rather than being required, so every
+    pre-existing call site stays valid and unattributed writes remain a
+    first-class case.
+    """
     event = InteractionEvent(
         user_id=user_id,
         book_id=book_id,
         event_type=event_type,
         shelf_id=shelf_id,
         payload=payload or {},
+        surface=attribution.surface,
+        session_id=attribution.session_id,
+        recommendation_request_id=attribution.recommendation_request_id,
+        search_query_id=attribution.search_query_id,
+        source_book_id=attribution.source_book_id,
+        rank_position=attribution.rank_position,
     )
     session.add(event)
     session.flush()

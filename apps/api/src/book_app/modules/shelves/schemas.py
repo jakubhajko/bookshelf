@@ -9,10 +9,19 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from book_app.modules.interactions.attribution import InteractionAttribution
+
 
 class ShelfCreateRequest(BaseModel):
     name: str
     description: str | None = None
+
+
+class ShelfBookAddRequest(BaseModel):
+    """Body for `PUT /shelves/{shelf_id}/books/{book_id}`, which previously
+    took none. Optional as a whole so a bodiless call still works."""
+
+    attribution: InteractionAttribution | None = None
 
 
 class ShelfUpdateRequest(BaseModel):

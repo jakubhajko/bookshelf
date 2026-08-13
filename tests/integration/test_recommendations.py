@@ -16,6 +16,7 @@ from book_recommender.contracts.provider import (
 from book_recommender.exceptions import ProviderError
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import Engine, text
 
 USERNAME = "recs_user"
 PASSWORD = "correct horse battery staple"
@@ -155,6 +156,66 @@ def test_home_pagination_cursor_returns_disjoint_pages(
     first_ids = {item["book_id"] for item in first["items"]}
     second_ids = {item["book_id"] for item in second["items"]}
     assert first_ids.isdisjoint(second_ids)
+
+
+def test_refetching_the_same_cursor_page_is_idempotent(
+    client: TestClient, insert_book: Callable[..., int], test_engine: Engine
+) -> None:
+    """Recommender Phase R1 regression (rec-spec §4.5).
+
+    Before R1 this returned a 500 on the second call: `create_impressions`
+    inserted unconditionally into a table with
+    `UNIQUE(request_id, book_id)`. ADR-0007's persisted-batch design makes
+    re-requesting the same cursor page ordinary client behavior — a
+    back-navigation, a retry, React Strict Mode's double effect — so this
+    was a live user-facing failure, not a theoretical one.
+
+    Asserts both halves: the request succeeds *and* the second delivery
+    doesn't double-count the exposure, which ADR-0015 relies on being
+    trustworthy.
+    """
+    _insert_books(insert_book, 10)
+    _register_and_login(client)
+
+    first = client.get("/api/v1/recommendations/home?limit=4").json()
+    cursor = first["next_cursor"]
+    assert cursor is not None
+
+    page_one = client.get(f"/api/v1/recommendations/home?limit=4&cursor={cursor}")
+    assert page_one.status_code == 200
+    page_two = client.get(f"/api/v1/recommendations/home?limit=4&cursor={cursor}")
+    assert page_two.status_code == 200, page_two.text
+    assert page_two.json()["items"] == page_one.json()["items"]
+
+    with test_engine.begin() as conn:
+        impressions = conn.execute(
+            text(
+                "SELECT book_id, count(*) AS n FROM recommendation_impressions "
+                "WHERE request_id = :request_id GROUP BY book_id"
+            ),
+            {"request_id": first["request_id"]},
+        ).mappings()
+        counts = {row["book_id"]: row["n"] for row in impressions}
+
+    assert counts, "expected impressions to have been recorded at all"
+    assert set(counts.values()) == {1}
+
+
+def test_refetching_the_first_page_is_idempotent(
+    client: TestClient, insert_book: Callable[..., int]
+) -> None:
+    """The first page has no incoming cursor, so each call generates a
+    *new* batch and its own request_id — different rows entirely, no
+    conflict to resolve. Guards the distinction so a future change can't
+    quietly make first-page fetches collide."""
+    _insert_books(insert_book, 10)
+    _register_and_login(client)
+
+    first = client.get("/api/v1/recommendations/home?limit=4")
+    second = client.get("/api/v1/recommendations/home?limit=4")
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["request_id"] != second.json()["request_id"]
 
 
 def test_invalid_cursor_is_rejected(client: TestClient) -> None:

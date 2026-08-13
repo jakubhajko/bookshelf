@@ -1,6 +1,8 @@
 import { EyeOff } from 'lucide-react'
 import { useState, type MouseEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router'
+import { forRank, type SurfaceAttribution } from '../api/attribution'
+import { recordBookOpened } from '../api/books'
 import { useBookState, useSyncShelvesMutation } from '../hooks/useBookState'
 import { useLastUsedShelf } from '../hooks/useLastUsedShelf'
 import { resolveBackgroundLocation } from '../routing/modalNavigation'
@@ -18,6 +20,11 @@ export interface BookCardData {
   title: string
   primary_author_name: string | null
   cover_object_key: string | null
+  /** Position within the surface that produced this item (rec-spec §4.3).
+   * `RecommendationBookItem` already carries it; other surfaces supply it
+   * by index where meaningful. Optional because plain listings (a shelf's
+   * own contents) have no ranking to attribute. */
+  rank?: number
 }
 
 interface BookCardProps {
@@ -28,6 +35,11 @@ interface BookCardProps {
    * session's last-used shelf for every other surface, since it *is* now
    * the most recently used one. */
   defaultShelfId?: string
+  /** What the surrounding surface knows about where this card came from
+   * (rec-spec §4.3) — the recommendation request, the search query, the
+   * source book. Combined with this card's own `rank` at the point of
+   * action, and omitted entirely by surfaces that genuinely know nothing. */
+  attribution?: SurfaceAttribution
 }
 
 /** No `transition-opacity` here, deliberately. A fade leaves the overlay
@@ -50,19 +62,32 @@ const OVERLAY_VISIBILITY =
  * devices are, imperfectly but reasonably, approximated by narrow
  * viewports here rather than feature-detecting touch support directly.
  */
-export function BookCard({ book, defaultShelfId }: BookCardProps) {
+export function BookCard({ book, defaultShelfId, attribution }: BookCardProps) {
   const navigate = useNavigate()
   const location = useLocation()
   const { rating, not_interested: notInterested, shelf_ids: shelfIds } = useBookState(book.book_id)
-  const syncShelves = useSyncShelvesMutation(book.book_id)
+  const cardAttribution = forRank(attribution, book.rank)
+  const syncShelves = useSyncShelvesMutation(book.book_id, cardAttribution)
   const [lastUsedShelfId, setLastUsedShelfId] = useLastUsedShelf()
   const [shelfSelectorOpen, setShelfSelectorOpen] = useState(false)
   const saved = shelfIds.length > 0
   const quickSaveShelfId = defaultShelfId ?? lastUsedShelfId
 
   function openDetail() {
+    // Best-effort, fired before navigating and never awaited (rec-spec
+    // §4.2): a click on a card is the least ambiguous "intentional open"
+    // signal the app has, and it's the one moment where full attribution
+    // is still in hand. Recording it inside the detail route instead would
+    // lose that context and re-fire on every refresh and remount.
+    recordBookOpened(book.book_id, cardAttribution)
     void navigate(`/books/${book.book_id}`, {
-      state: { backgroundLocation: resolveBackgroundLocation(location) },
+      state: {
+        backgroundLocation: resolveBackgroundLocation(location),
+        // Carried so a rating or save made on the detail page is still
+        // credited to the recommendation that produced the visit
+        // (rec-spec §4.3).
+        attribution: cardAttribution,
+      },
     })
   }
 
@@ -137,6 +162,7 @@ export function BookCard({ book, defaultShelfId }: BookCardProps) {
           defaultShelfId={defaultShelfId}
           open={shelfSelectorOpen}
           onOpenChange={setShelfSelectorOpen}
+          attribution={cardAttribution}
         />
 
         {/* The one place the accent carries real weight: a solid, compact

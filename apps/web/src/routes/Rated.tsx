@@ -152,7 +152,7 @@ export function RatedPage() {
           </p>
         )}
 
-        {!isLoading && items.length > 0 && <BookMasonryGrid items={items} />}
+        {!isLoading && items.length > 0 && <BookMasonryGrid items={items} attribution={{ surface: 'rated' }} />}
 
         <div ref={sentinelRef} className="h-1" />
         {isFetchingNextPage && (

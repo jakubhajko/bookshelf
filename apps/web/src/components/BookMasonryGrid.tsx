@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import type { SurfaceAttribution } from '../api/attribution'
 import { useGridTier } from '../hooks/useGridTier'
 import { BookCard, type BookCardData } from './BookCard'
 import { CardSkeleton } from './CardSkeleton'
@@ -47,6 +48,9 @@ interface BookMasonryGridProps {
   /** Forwarded to every card — shelf-discover context (spec §12.8:
    * "defaults Save to current shelf"). */
   defaultShelfId?: string
+  /** Forwarded to every card — where this grid's items came from
+   * (rec-spec §4.3). Each card combines it with its own `rank`. */
+  attribution?: SurfaceAttribution
   /** Upper bound on the viewport-derived column count, for grids that
    * don't span the viewport. `useGridTier` measures `window`, so inside
    * a narrow container — the detail dialog's "Similar books" strip — the
@@ -55,7 +59,12 @@ interface BookMasonryGridProps {
   maxColumns?: number
 }
 
-export function BookMasonryGrid({ items, defaultShelfId, maxColumns }: BookMasonryGridProps) {
+export function BookMasonryGrid({
+  items,
+  defaultShelfId,
+  maxColumns,
+  attribution,
+}: BookMasonryGridProps) {
   const tier = useGridTier()
   const columnCount = Math.min(tier.columns, maxColumns ?? Infinity)
   const columns = useMemo(() => distributeIntoColumns(items, columnCount), [items, columnCount])
@@ -65,7 +74,12 @@ export function BookMasonryGrid({ items, defaultShelfId, maxColumns }: BookMason
       {columns.map((column, columnIndex) => (
         <div key={columnIndex} className={`flex flex-1 flex-col ${COLUMN_GAP}`}>
           {column.map((book) => (
-            <BookCard key={book.book_id} book={book} defaultShelfId={defaultShelfId} />
+            <BookCard
+              key={book.book_id}
+              book={book}
+              defaultShelfId={defaultShelfId}
+              attribution={attribution}
+            />
           ))}
         </div>
       ))}

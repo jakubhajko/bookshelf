@@ -54,7 +54,14 @@ export function ShelfDiscoverFeed({ shelfId }: { shelfId: string }) {
 
   return (
     <div>
-      <BookMasonryGrid items={items} defaultShelfId={shelfId} />
+      <BookMasonryGrid
+        items={items}
+        defaultShelfId={shelfId}
+        attribution={{
+          surface: 'shelf',
+          recommendation_request_id: data?.pages[0]?.request_id,
+        }}
+      />
       <div ref={sentinelRef} className="h-1" />
       {isFetchingNextPage && (
         <p className="py-4 text-center text-sm text-text-muted">Loading more…</p>

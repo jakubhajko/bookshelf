@@ -980,8 +980,8 @@ repository valid, tested and resumable.
 
 | Phase | Scope | Status |
 |---|---|---|
-| R0 | Reconcile, baseline, lock architectural decisions | **done, this pass** |
-| R1 | Interaction instrumentation, attribution, impression correctness | not started |
+| R0 | Reconcile, baseline, lock architectural decisions | done |
+| R1 | Interaction instrumentation, attribution, impression correctness | **done, this pass** |
 | R2 | Rich user context, profile version, cold-start taste seeds | not started |
 | R3 | Artifact substrate, data validation, source-similarity export | not started |
 | R4 | CF artifacts: ALS + item-item | not started |
@@ -1179,13 +1179,169 @@ OpenAPI surface and no frontend behavior.
   `packages/recommender/src` or
   `apps/api/src/book_app/modules/recommendations/` was touched.
 
-### Phases R1-R9 — not started
+### Phase R1 — Interaction instrumentation, attribution and impression correctness — **done, this pass**
+
+Goal: make the raw behavioral record trustworthy *before* building models
+that depend on it. No recommendation algorithm changed; what changed is
+what gets written down.
+
+#### R1 checklist
+
+- [x] Fix non-idempotent recommendation-impression writes (R0 drift #4 —
+  a live defect, not a missing feature).
+- [x] Shared typed optional `InteractionAttribution` + closed
+  `InteractionSurface` set; six `interaction_events` columns finally
+  written.
+- [x] `book_opened` event type and a dedicated write endpoint;
+  `GET /books/{id}` stays side-effect free.
+- [x] Attribution propagated into rating / Not-Interested / shelf-save
+  writes.
+- [x] `shelf_books.source_surface` populated from a known save origin.
+- [x] `search_queries` table + explicit POST write path; suggestions write
+  nothing.
+- [x] Search-query → book-open attribution.
+- [x] Frontend browsing session (`sessionStorage`, ~30 min idle rotation,
+  never the auth `sid`).
+- [x] One reusable frontend attribution type, threaded surface → grid →
+  card → action, and into the detail view a card opened.
+- [x] Retention/cleanup policy documented (below) with no background-job
+  stack added.
+- [x] Tests landed with the phase; full gates green; live smoke test and
+  real-browser E2E run.
+
+#### What the app can now answer
+
+The R1 acceptance question — *"what was shown, what did the reader
+intentionally open, and which recommendation or search caused the
+open/save/rating when known?"* — verified against the real dev database
+(§5j), not just in tests:
+
+| Event | surface | session | request id | search query |
+|---|---|---|---|---|
+| `book_opened` (from Home card) | `home` | yes | yes | — |
+| `book_opened` (from a search result) | `search` | yes | — | yes |
+| `rating_set` (rated after seeing it on Home) | `home` | yes | yes | — |
+| `shelf_book_added` (saved from search) | `search` | yes | — | yes |
+| `search_submitted` (null `book_id`) | `search` | yes | — | yes |
+
+#### Design decisions worth recording
+
+- **`InteractionSurface` is a closed enum, not free text**, even though the
+  column is `TEXT`. This data trains models; a typo'd surface is a
+  silently-wrong row that no database constraint would catch. Unknown
+  values are rejected at the API edge with a 422 (tested).
+- **Attribution rides on `set` operations, not `DELETE`s.** Rating removal
+  and Not-Interested removal are corrections whose origin surface carries
+  little preference signal, and `DELETE`-with-body is poorly supported
+  across proxies and clients. Documented rather than silently skipped.
+- **A shelf *removal* is never stamped with save attribution.** The
+  surface a reader happened to be on while un-shelving says nothing about
+  why the book was saved; stamping it would misattribute the original
+  save. Explicitly tested.
+- **`search_queries` has no `result_count`.** At submit time the caller
+  hasn't seen results, and adding a second round trip to backfill a number
+  nothing consumes isn't justified. It's an additive nullable column
+  whenever a consumer appears.
+- **`book_opened` fires on the card click, not on detail-route mount.** A
+  click is unambiguously intentional and is the moment full attribution is
+  still in hand; mounting also fires on refreshes, remounts and back
+  navigation. Consequence: direct-URL/bookmark visits are *not* recorded
+  as opens in R1 — see risk #83.
+- **Attribution reaches the detail page via router location state.** It
+  expires exactly the way attribution should — bound to that history
+  entry, surviving back/forward to the same page, gone on unrelated
+  navigation — so nothing has to remember to clear it, which is how stale
+  attribution normally happens.
+- **The submitted-search id travels through a module store, not the
+  router.** Recording a search is a network round trip and navigation must
+  not wait for it, so the search bar fires the write and navigates in the
+  same tick; the results page picks the id up reactively if it arrives
+  first. Deliberately not persisted: a reload or a shared `?q=` link is
+  not a submitted search, and attributing one to an earlier sitting's
+  search would be a fabricated causal link.
+
+#### Recommendation/event data retention (documented, not automated)
+
+rec-spec §4.5 asks for retention *considerations*, explicitly without a
+background-job stack. Current position:
+
+- `recommendation_requests` / `recommendation_results` /
+  `recommendation_impressions` are a short-lived cache bounded by
+  `expires_at` (30 min, ADR-0007), but nothing deletes expired rows today.
+  They accumulate at roughly one request row + 60 result rows + one
+  impression row per delivered book, per feed request.
+- `interaction_events` and `search_queries` are **permanent** by design —
+  they are the training record (ADR-0015), not a cache, and must not be
+  pruned on the same schedule.
+- The established pattern for this class of maintenance is an explicit CLI
+  run on demand (`make cleanup-sessions`, Phase 3), not a scheduler. A
+  `cleanup-recommendations` CLI following that precedent is the intended
+  shape; it is **not built** — see risk #84.
+- Privacy: search text and open history are personal data. They are never
+  logged, never returned in diagnostics, and are removed with the user via
+  `ON DELETE CASCADE` on `user_id`.
+
+#### Changed files (R1)
+
+Backend:
+
+- `modules/interactions/attribution.py` — **new**: `InteractionAttribution`
+  + `InteractionSurface` + `NO_ATTRIBUTION`.
+- `modules/interactions/event_types.py` — `BOOK_OPENED`,
+  `SEARCH_SUBMITTED`.
+- `modules/interactions/repository.py` — `append_event` writes all six
+  attribution columns.
+- `modules/interactions/service.py` — attribution on `set_rating` /
+  `set_not_interested`; new `record_book_opened`.
+- `modules/books/api.py`, `modules/books/schemas.py` — `POST
+  /books/{id}/opened`; optional attribution on rating / not-interested /
+  shelf-sync bodies.
+- `modules/shelves/service.py`, `api.py`, `schemas.py` — attribution
+  through both save paths; `source_surface` finally populated.
+- `modules/search/models.py` — **new**: `SearchQuery`.
+- `modules/search/service.py`, `api.py`, `schemas.py` —
+  `record_submitted_search`, `POST /search/queries`.
+- `modules/recommendations/repository.py` — `create_impressions` is now
+  `ON CONFLICT DO NOTHING`.
+- `migrations/env.py` — register the new models module.
+- `migrations/versions/4c90a8d2fc36_search_queries.py` — **new**, the only
+  schema change in R1.
+
+Frontend:
+
+- `api/browsingSession.ts`, `api/attribution.ts`, `api/submittedSearch.ts`
+  — **new**.
+- `api/books.ts` — `recordBookOpened`; attribution on rating /
+  not-interested / shelf sync.
+- `hooks/useBookState.ts` — mutations accept attribution.
+- `components/BookCard.tsx`, `BookMasonryGrid.tsx`,
+  `ShelfSelectorPopover.tsx`, `BookDetailContent.tsx` — attribution
+  threading; `book_opened` fired on card click.
+- `routing/modalNavigation.ts` — attribution carried in location state;
+  `useOpenAttribution`.
+- `routes/Home.tsx`, `Search.tsx`, `ShelfDiscover.tsx`, `ShelfBooks.tsx`,
+  `Rated.tsx`, `shell/SearchBar.tsx` — each surface supplies its own
+  attribution.
+- `api/generated/schema.d.ts`, `openapi.json` — regenerated (24 paths).
+
+Tests:
+
+- `tests/integration/test_interaction_attribution.py` — **new**, 24 tests.
+- `tests/integration/test_recommendations.py` — 2 new idempotency tests.
+- `apps/web/src/api/browsingSession.test.ts` (6),
+  `api/submittedSearch.test.tsx` (6),
+  `components/BookCardAttribution.test.tsx` (4),
+  `shell/SearchBarInstrumentation.test.tsx` (4) — **new**.
+- `components/ShelfSelectorPopover.test.tsx` — two assertions updated for
+  the new `syncBookShelves` arity.
+
+### Phases R2-R9 — not started
 
 Scope, tasks and per-phase acceptance criteria live in
 `RECOMMENDER_IMPLEMENTATION_PLAN.md` and are not duplicated here. Each phase
 appends its own record to this section as it lands, in the same shape as R0
-above: checklist, drift found, decisions/ADRs, changed files, commands run
-with real results, and unresolved risks appended to §6.
+and R1 above: checklist, drift found, decisions/ADRs, changed files,
+commands run with real results, and unresolved risks appended to §6.
 
 Standing constraints for every recommender phase (from `CLAUDE.md` and
 rec-spec §2, restated because they are the ones easiest to violate
@@ -1767,6 +1923,88 @@ schema, no query, no route, no OpenAPI surface and no frontend code, so
 neither suite has anything new to exercise; both remain as last verified in
 §5h. No migration was created and `make generate-api-client` was not run,
 for the same reason.
+
+## 5j. Recommender Phase R1 validation commands and results
+
+```bash
+# Migration: the only schema change this phase. Autogenerated, then
+# hand-edited to strip the three phantom index drops (see the migration's
+# own docstring), then round-tripped against the real dev database.
+cd apps/api && uv run alembic upgrade head
+                 uv run alembic downgrade -1
+                 uv run alembic upgrade head
+# Confirmed the hand-written search indexes survived the round trip:
+psql -c "select indexname from pg_indexes where tablename='books'"
+#   ix_books_description_fts, ix_books_primary_author_name_trgm,
+#   ix_books_title_trgm all still present.
+
+make generate-api-client        # 24 paths exported (was 20)
+
+make test
+# apps/api        127 passed
+# packages/recommender  38 passed  (untouched this phase)
+# apps/web         93 passed (25 files) — was 73/21
+make lint                       # clean, all four targets
+make typecheck                  # clean: 118 + 26 source files, apps/web
+uv run --project apps/api pytest tests/integration -q
+#                140 passed     — was 114
+```
+
+**Proving the impression regression test actually catches the bug.** Before
+trusting it, `create_impressions` was temporarily reverted to its pre-R1
+`add_all` form and the test re-run:
+
+```text
+FAILED tests/integration/test_recommendations.py::
+       test_refetching_the_same_cursor_page_is_idempotent
+```
+
+The fix was then restored and the suite re-run green. A regression test
+that has never been seen to fail is an assumption, not a test.
+
+**Live smoke test** against the real dev database (92,524 books), driving
+the exact HTTP contract the frontend is written against:
+
+```text
+GET  /recommendations/home?limit=3            -> 200, request_id + ranks
+GET  .../home?limit=3&cursor=<same cursor> x3 -> 200, 200, 200
+       (pre-R1 this was 200, 500, 500)
+POST /books/{id}/opened      (home attribution)     -> 204
+POST /search/queries         ("dune")               -> 201 + id
+GET  /search/books?q=dun     (suggestions)          -> 200
+PUT  /books/{id}/rating      (home attribution)     -> 200
+PUT  /books/{id}/shelves     (search attribution)   -> 200
+POST /books/{id}/opened      (search attribution)   -> 204
+```
+
+Then verified in PostgreSQL directly, which is the assertion that matters:
+
+- 5 events written with the right provenance — `book_opened` (home,
+  session, request, rank 0), `search_submitted` (null `book_id`, carries
+  `search_query_id`), `rating_set` (home, session, request, rank),
+  `shelf_book_added` (search, session, `search_query_id`), `book_opened`
+  (search, `search_query_id`);
+- exactly **one** `search_queries` row — the suggestions `GET` recorded
+  nothing, which is rec-spec §4.4's load-bearing rule;
+- `shelf_books.source_surface = 'search'`, the first non-null value that
+  column has ever held;
+- `recommendation_impressions`: exactly 1 row per book after 3 refetches
+  of the same cursor page.
+
+Server logs stayed clean throughout: status codes `{200: 10, 201: 3,
+204: 2}`, no error-level entries, no tracebacks.
+
+**E2E** (`make e2e`, real Chromium, real API, real PostgreSQL): the spec
+§13.5 critical flow passed, run 3 consecutive times with no flakes — worth
+running here specifically because R1 adds a fire-and-forget POST to every
+card click, and Phase 9 found two genuine races in exactly this code path.
+Both axe scans still gate clean; the one moderate `page-has-heading-one`
+finding is unchanged and pre-existing (risk #67).
+
+Afterwards, the events the *real browser* produced were inspected: all 8
+`book_opened` rows carry a surface and session, 7 of them a recommendation
+request id, and 7 `shelf_book_added` rows carry full attribution —
+confirming the chain works end to end in a browser, not only in jsdom.
 
 ## 6. Risks and assumptions
 
@@ -2610,16 +2848,63 @@ conservative, reversible default and document it."
     dependencies must land in a group the API runtime does not install
     (ADR-0018).
 
+### Recommender Phase R1
+
+82. **Attribution coverage is partial by design, and analysis must treat
+    it that way.** A null `surface` means "origin genuinely unknown"
+    (bookmark, direct link, a path R1 didn't instrument) — it is not a
+    category and must never be modelled as one. Roughly: recommendation
+    surfaces and search are attributed; anything reached outside the app's
+    own navigation is not.
+83. **Direct-URL and bookmark visits are not recorded as opens.**
+    `book_opened` fires on the card click, not on detail-route mount, so a
+    reader who pastes a book URL, refreshes, or returns via browser
+    history generates no open event. This was the deliberate trade (see
+    R1 decisions): mount-time firing would record refreshes and remounts
+    as intent and inflate the signal. The consequence is an undercount
+    skewed *toward* in-app navigation, which matters when open frequency
+    is eventually used as evidence. Revisit if the undercount proves
+    material — a mount-time fire guarded by a per-history-entry flag would
+    close it.
+84. **Nothing deletes expired recommendation batches.** `expires_at`
+    bounds how long a batch is *usable* (ADR-0007), not how long its rows
+    live, so `recommendation_requests`/`results`/`impressions` grow
+    monotonically — about 60 result rows per feed request. Harmless at
+    development volume, unbounded in principle. The policy is documented
+    in §3R and the intended shape is an explicit CLI mirroring
+    `make cleanup-sessions`; it is not built, and rec-spec §4.5 rules out
+    adding a scheduler for it. `interaction_events`/`search_queries` are
+    deliberately exempt — they are the permanent training record.
+85. **`InteractionSurface` is a closed set, so adding a surface is a
+    two-repo change.** New surfaces need the enum, a regenerated client,
+    and the call site. That friction is the point (it's what keeps typo'd
+    surfaces out of training data), but it will feel like overhead the
+    first time someone adds a surface in a hurry and gets a 422.
+86. **The submitted-search id can lose a race with a fast click.**
+    `recordSubmittedSearch` fires without blocking navigation, so a reader
+    who submits and clicks a result before the write returns produces an
+    open with no `search_query_id`. Correct per ADR-0015 (better missing
+    than invented) and rare in practice, but it means search→open
+    attribution is a lower bound, not a complete census.
+87. **Two `book_opened` events fire for one logical open in React Strict
+    Mode**? No — checked, not the case: the call sits in a click handler,
+    not an effect, so Strict Mode's double-invocation doesn't reach it.
+    Noted explicitly because it's the obvious failure mode for this kind
+    of instrumentation and the next reader will wonder.
+
 ## 7. Next phase
 
-**Recommender Phase R1 — interaction instrumentation, attribution and
-impression correctness.** Scope and acceptance criteria are in
-`RECOMMENDER_IMPLEMENTATION_PLAN.md`; the live gaps it consumes are
-recorded at §3R "Drift and gaps found" items 4-8 and 14. Its first backend
-task is the non-idempotent impression write (item 4) — a defect in shipped
-code, not new construction.
+**Recommender Phase R2 — rich user context, deterministic profile version
+and cold-start taste seeds.** Scope and acceptance criteria are in
+`RECOMMENDER_IMPLEMENTATION_PLAN.md`; the live gap it consumes is recorded
+at §3R "Drift and gaps found" item 9 (`UserContext` has no per-shelf
+membership, no `added_at`, no taste seeds, and a `profile_version` field
+that no producer sets). ADR-0019 governs how taste seeds are stored.
 
-R1 has not been started. Do not begin it as part of an R0 pass.
+R2 has not been started. Do not begin it as part of an R1 pass.
+
+R1 closed drift items 4-8 and 14. Item 9 is R2's; items 10-13 and 15 belong
+to R3-R5.
 
 ### The application sequence is complete
 

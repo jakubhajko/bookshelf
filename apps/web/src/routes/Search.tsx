@@ -2,6 +2,7 @@ import { useInfiniteQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router'
 import { queryKeys } from '../api/queryKeys'
 import * as searchApi from '../api/search'
+import { useSubmittedSearchQueryId } from '../api/submittedSearch'
 import { BookMasonryGrid, BookMasonrySkeleton } from '../components/BookMasonryGrid'
 import { useSeedBookStatesFromSearchResults } from '../hooks/useBookState'
 import { useInfiniteScrollSentinel } from '../hooks/useInfiniteScrollSentinel'
@@ -28,8 +29,20 @@ export function SearchPage() {
     !hasNextPage || isFetchingNextPage,
   )
 
-  const items = data?.pages.flatMap((page) => page.items) ?? []
-  useSeedBookStatesFromSearchResults(items)
+  const rawItems = data?.pages.flatMap((page) => page.items) ?? []
+  useSeedBookStatesFromSearchResults(rawItems)
+
+  // `SearchResultItem` carries no rank of its own (unlike
+  // `RecommendationBookItem`), but result *position* is exactly what makes
+  // search→open attribution useful — "they opened the 7th result" is a
+  // different statement from "they opened the 1st". Position in this
+  // flattened list is the rank the reader actually saw.
+  const items = rawItems.map((item, index) => ({ ...item, rank: index }))
+
+  // Present only when this page was reached by an actual submitted search
+  // this session (`shell/SearchBar.tsx` records it). A reload or a shared
+  // link legitimately has none — ADR-0015: don't invent attribution.
+  const searchQueryId = useSubmittedSearchQueryId(query)
 
   return (
     <div className="p-4 sm:p-6">
@@ -71,7 +84,12 @@ export function SearchPage() {
           </p>
         )}
 
-        {!isLoading && items.length > 0 && <BookMasonryGrid items={items} />}
+        {!isLoading && items.length > 0 && (
+          <BookMasonryGrid
+            items={items}
+            attribution={{ surface: 'search', search_query_id: searchQueryId }}
+          />
+        )}
 
         <div ref={sentinelRef} className="h-1" />
         {isFetchingNextPage && (

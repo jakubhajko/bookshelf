@@ -3,8 +3,10 @@ import { useQuery } from '@tanstack/react-query'
 import { Search as SearchIcon } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
+import { recordBookOpened } from '../api/books'
 import { queryKeys } from '../api/queryKeys'
 import * as searchApi from '../api/search'
+import { recordSubmittedSearch } from '../api/submittedSearch'
 import { useRecentSearches } from '../hooks/useRecentSearches'
 
 const SUGGESTION_LIMIT = 5
@@ -50,6 +52,12 @@ export function SearchBar() {
     const trimmed = rawQuery.trim()
     if (!trimmed) return
     addRecentSearch(trimmed)
+    // The one place a search is *committed* (rec-spec §4.4). The
+    // suggestions query above deliberately records nothing — it fires on
+    // every debounce tick, so logging it would store keystroke prefixes
+    // instead of intent. Fired without awaiting: navigation must not wait
+    // on an analytics write.
+    recordSubmittedSearch(trimmed)
     setOpen(false)
     void navigate(`/search?q=${encodeURIComponent(trimmed)}`)
   }
@@ -59,7 +67,13 @@ export function SearchBar() {
     runSearch(query)
   }
 
-  function goToBook(bookId: number) {
+  function goToBook(bookId: number, rank: number) {
+    // Jumping straight to a book from the dropdown is an intentional open
+    // like any other (rec-spec §4.2) — attributed to the search surface
+    // and the suggestion's position, though not to a `search_query_id`:
+    // the reader picked a suggestion instead of submitting, so no
+    // committed search exists to point at.
+    recordBookOpened(bookId, { surface: 'search', rank_position: rank })
     setOpen(false)
     void navigate(`/books/${bookId}`)
   }
@@ -125,11 +139,11 @@ export function SearchBar() {
 
           {trimmedQuery.length > 0 && suggestions.length > 0 && (
             <div>
-              {suggestions.map((item) => (
+              {suggestions.map((item, index) => (
                 <button
                   key={item.book_id}
                   type="button"
-                  onClick={() => goToBook(item.book_id)}
+                  onClick={() => goToBook(item.book_id, index)}
                   className="flex w-full items-center gap-2 rounded-sm px-3 py-2 text-left text-sm text-text hover:bg-surface-hover"
                 >
                   <span className="truncate">{item.title}</span>

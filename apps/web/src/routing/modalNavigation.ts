@@ -1,4 +1,5 @@
-import type { Location } from 'react-router'
+import { useLocation, type Location } from 'react-router'
+import type { InteractionAttribution } from '../api/attribution'
 
 /** Location `state` shape used by the book-detail modal-route pattern
  * (spec §12.7: "Desktop route-backed modal over prior page"). Storing the
@@ -7,6 +8,18 @@ import type { Location } from 'react-router'
  * navigating away from it — see `App.tsx` for the two-`<Routes>` setup. */
 export interface ModalLocationState {
   backgroundLocation?: Location
+  /** How this detail view was reached (rec-spec §4.3). Carried so an
+   * action taken *on* the detail page still records the recommendation
+   * that led there — rec-spec §4.3 asks for attribution to propagate into
+   * a "recommendation-opened detail view", not just the card click.
+   *
+   * Location state is the right carrier precisely because it expires the
+   * way attribution should: it belongs to this history entry, so it
+   * survives back/forward to the same page and vanishes the moment the
+   * reader navigates somewhere unrelated. Nothing has to remember to clear
+   * it, which is how stale attribution normally happens.
+   */
+  attribution?: InteractionAttribution
 }
 
 /**
@@ -20,4 +33,15 @@ export interface ModalLocationState {
 export function resolveBackgroundLocation(location: Location): Location {
   const state = location.state as ModalLocationState | null
   return state?.backgroundLocation ?? location
+}
+
+/**
+ * The attribution this detail view was opened with, if any. Returns
+ * `undefined` for a direct URL visit, a reload, or a bookmark — all of
+ * which genuinely have no origin to report (ADR-0015).
+ */
+export function useOpenAttribution(): InteractionAttribution | undefined {
+  const location = useLocation()
+  const state = location.state as ModalLocationState | null
+  return state?.attribution
 }

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from book_app.modules.books import repository as books_repository
 from book_app.modules.books.exceptions import BookNotFoundError
 from book_app.modules.interactions import repository as interactions_repository
+from book_app.modules.interactions.attribution import NO_ATTRIBUTION, InteractionAttribution
 from book_app.modules.interactions.event_types import EventType
 from book_app.modules.shelves import repository as shelves_repository
 from book_app.modules.shelves.exceptions import ShelfNameTakenError, ShelfNotFoundError
@@ -139,7 +140,7 @@ def add_book_to_shelf(
     user_id: UUID,
     shelf_id: UUID,
     book_id: int,
-    source_surface: str | None = None,
+    attribution: InteractionAttribution = NO_ATTRIBUTION,
 ) -> None:
     _require_owned_shelf(session, user_id=user_id, shelf_id=shelf_id)
     if books_repository.get_by_id(session, book_id) is None:
@@ -149,7 +150,7 @@ def add_book_to_shelf(
         return  # idempotent no-op, nothing changed
 
     shelves_repository.add_book(
-        session, shelf_id=shelf_id, book_id=book_id, source_surface=source_surface
+        session, shelf_id=shelf_id, book_id=book_id, source_surface=attribution.surface
     )
     interactions_repository.append_event(
         session,
@@ -157,6 +158,7 @@ def add_book_to_shelf(
         book_id=book_id,
         event_type=EventType.SHELF_BOOK_ADDED,
         shelf_id=shelf_id,
+        attribution=attribution,
     )
     session.commit()
 
@@ -181,11 +183,23 @@ def remove_book_from_shelf(
 
 
 def sync_book_shelves(
-    session: Session, *, user_id: UUID, book_id: int, shelf_ids: list[UUID]
+    session: Session,
+    *,
+    user_id: UUID,
+    book_id: int,
+    shelf_ids: list[UUID],
+    attribution: InteractionAttribution = NO_ATTRIBUTION,
 ) -> list[UUID]:
     """Atomically replace the book's shelf memberships for this user (spec
     §9.2: "atomically replaces the current user's shelf memberships for
-    that book after ownership validation")."""
+    that book after ownership validation").
+
+    Attribution describes the *save*, so it is recorded on additions only.
+    A removal in the same sync gets an event without it: the surface the
+    reader happened to be on when un-shelving says nothing about why the
+    book was saved in the first place, and stamping the removal with it
+    would misattribute the original save's origin.
+    """
     if books_repository.get_by_id(session, book_id) is None:
         raise BookNotFoundError()
 
@@ -203,13 +217,16 @@ def sync_book_shelves(
     to_remove = sorted(current - requested, key=str)
 
     for shelf_id in to_add:
-        shelves_repository.add_book(session, shelf_id=shelf_id, book_id=book_id)
+        shelves_repository.add_book(
+            session, shelf_id=shelf_id, book_id=book_id, source_surface=attribution.surface
+        )
         interactions_repository.append_event(
             session,
             user_id=user_id,
             book_id=book_id,
             event_type=EventType.SHELF_BOOK_ADDED,
             shelf_id=shelf_id,
+            attribution=attribution,
         )
     for shelf_id in to_remove:
         shelves_repository.remove_book(session, shelf_id=shelf_id, book_id=book_id)

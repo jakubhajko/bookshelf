@@ -4,9 +4,13 @@ objects directly (spec §4.2).
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel, Field
 
 from book_app.modules.books.schemas import BookUserState
+from book_app.modules.interactions.attribution import InteractionSurface
 
 
 class SearchResultItem(BaseModel):
@@ -29,3 +33,25 @@ class SearchResultItem(BaseModel):
 class SearchResultsResponse(BaseModel):
     items: list[SearchResultItem]
     next_cursor: str | None
+
+
+class SearchQueryCreateRequest(BaseModel):
+    """A *committed* search (rec-spec §4.4). Deliberately has no
+    `result_count`: at submit time the caller hasn't seen any results yet,
+    and adding a second round trip purely to backfill a number nothing
+    currently consumes isn't justified. It's an additive nullable column
+    whenever a consumer appears."""
+
+    query_text: str = Field(min_length=1, max_length=200)
+    session_id: UUID | None = None
+    surface: InteractionSurface | None = None
+
+
+class SearchQueryResponse(BaseModel):
+    """The id is the point: the caller holds it and passes it back as
+    `attribution.search_query_id` when the reader opens a result, which is
+    what links a search to what it produced (rec-spec §4.4)."""
+
+    id: UUID
+    query_text: str
+    occurred_at: datetime

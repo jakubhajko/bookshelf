@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from book_app.modules.books import repository as books_repository
 from book_app.modules.books.exceptions import BookNotFoundError
 from book_app.modules.interactions import repository as interactions_repository
+from book_app.modules.interactions.attribution import NO_ATTRIBUTION, InteractionAttribution
 from book_app.modules.interactions.event_types import EventType
 from book_app.modules.interactions.models import UserBookState
 from book_app.modules.interactions.rating_scale import public_to_internal
@@ -28,11 +29,17 @@ def _require_book(session: Session, book_id: int) -> None:
 
 
 def set_rating(
-    session: Session, *, user_id: UUID, book_id: int, public_rating: float
+    session: Session,
+    *,
+    user_id: UUID,
+    book_id: int,
+    public_rating: float,
+    attribution: InteractionAttribution = NO_ATTRIBUTION,
 ) -> UserBookState:
     """Set rating (spec §5.3): clears Not Interested atomically, preserves
     shelf memberships (nothing here touches shelf_books). A no-op re-PUT of
-    the same value appends no event."""
+    the same value appends no event — and therefore records no attribution
+    either, which is correct: nothing happened to attribute."""
     _require_book(session, book_id)
     internal_value = public_to_internal(public_rating)
 
@@ -56,6 +63,7 @@ def set_rating(
             book_id=book_id,
             event_type=EventType.RATING_SET,
             payload=payload,
+            attribution=attribution,
         )
     else:
         interactions_repository.append_event(
@@ -64,6 +72,7 @@ def set_rating(
             book_id=book_id,
             event_type=EventType.RATING_CHANGED,
             payload={"previous_rating": previous_rating, "rating": internal_value},
+            attribution=attribution,
         )
 
     session.commit()
@@ -91,9 +100,22 @@ def remove_rating(session: Session, *, user_id: UUID, book_id: int) -> None:
     session.commit()
 
 
-def set_not_interested(session: Session, *, user_id: UUID, book_id: int) -> UserBookState:
+def set_not_interested(
+    session: Session,
+    *,
+    user_id: UUID,
+    book_id: int,
+    attribution: InteractionAttribution = NO_ATTRIBUTION,
+) -> UserBookState:
     """Set Not Interested (spec §5.3): clears any rating atomically,
-    preserves shelves. Idempotent if already Not Interested."""
+    preserves shelves. Idempotent if already Not Interested.
+
+    Attribution matters more here than anywhere else: rec-spec §7.1 makes
+    this the single strongest explicit negative signal, so *which* surface
+    provoked a rejection is exactly the kind of evidence a later ranker
+    needs — rejecting a book shown on Home is a different statement from
+    rejecting one shown as similar to a book the reader loves.
+    """
     _require_book(session, book_id)
     state = interactions_repository.get_or_create_state(session, user_id=user_id, book_id=book_id)
 
@@ -113,6 +135,7 @@ def set_not_interested(session: Session, *, user_id: UUID, book_id: int) -> User
         book_id=book_id,
         event_type=EventType.NOT_INTERESTED_SET,
         payload=payload,
+        attribution=attribution,
     )
     session.commit()
     return state
@@ -131,6 +154,37 @@ def remove_not_interested(session: Session, *, user_id: UUID, book_id: int) -> N
     state.not_interested = False
     interactions_repository.append_event(
         session, user_id=user_id, book_id=book_id, event_type=EventType.NOT_INTERESTED_REMOVED
+    )
+    session.commit()
+
+
+def record_book_opened(
+    session: Session,
+    *,
+    user_id: UUID,
+    book_id: int,
+    attribution: InteractionAttribution = NO_ATTRIBUTION,
+) -> None:
+    """Record an intentional book-detail open (rec-spec §4.2).
+
+    Deliberately a write path of its own rather than a side effect of
+    `GET /books/{id}` (ADR-0015): a read endpoint that silently writes
+    fires on link prefetches, crawlers and every page refresh, none of
+    which are a reader deciding to open a book.
+
+    Changes no `user_book_states` row — an open is attention, not a
+    preference (rec-spec §7.1), so nothing here touches rating,
+    Not Interested, or shelf membership. Repeated opens of the same book
+    append repeated events by design; frequency *is* the signal, so
+    de-duplicating them would discard it.
+    """
+    _require_book(session, book_id)
+    interactions_repository.append_event(
+        session,
+        user_id=user_id,
+        book_id=book_id,
+        event_type=EventType.BOOK_OPENED,
+        attribution=attribution,
     )
     session.commit()
 

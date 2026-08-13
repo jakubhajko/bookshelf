@@ -2,6 +2,7 @@ import * as Popover from '@radix-ui/react-popover'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, Plus } from 'lucide-react'
 import { useState } from 'react'
+import type { InteractionAttribution } from '../api/attribution'
 import { queryKeys } from '../api/queryKeys'
 import * as shelvesApi from '../api/shelves'
 import { useBookState, useSyncShelvesMutation } from '../hooks/useBookState'
@@ -23,6 +24,9 @@ interface ShelfSelectorPopoverProps {
    * detail page where nothing else needs to open it. */
   open?: boolean
   onOpenChange?: (open: boolean) => void
+  /** Where the save originated (rec-spec §4.3) — stamps both the save
+   * event and `shelf_books.source_surface` on newly-added memberships. */
+  attribution?: InteractionAttribution
 }
 
 /** Searchable, multi-select, create-capable shelf picker (spec §12.6).
@@ -37,6 +41,7 @@ export function ShelfSelectorPopover({
   defaultShelfId,
   open: controlledOpen,
   onOpenChange,
+  attribution,
 }: ShelfSelectorPopoverProps) {
   const [internalOpen, setInternalOpen] = useState(false)
   const open = controlledOpen ?? internalOpen
@@ -50,7 +55,7 @@ export function ShelfSelectorPopover({
     staleTime: 30_000,
   })
   const { shelf_ids: shelfIds } = useBookState(bookId)
-  const syncShelves = useSyncShelvesMutation(bookId)
+  const syncShelves = useSyncShelvesMutation(bookId, attribution)
   const [lastUsedShelfId, setLastUsedShelfId] = useLastUsedShelf()
 
   // The shelf the trigger names. A book already on a shelf shows that

@@ -15,12 +15,15 @@ from book_app.modules.books import service as books_service
 from book_app.modules.books.schemas import (
     BookAuthorPublic,
     BookDetail,
+    BookOpenedRequest,
     BookUserState,
+    NotInterestedRequest,
     PreferenceState,
     RatingRequest,
     ShelfSyncRequest,
 )
 from book_app.modules.interactions import service as interactions_service
+from book_app.modules.interactions.attribution import NO_ATTRIBUTION, InteractionAttribution
 from book_app.modules.interactions.models import UserBookState
 from book_app.modules.interactions.rating_scale import internal_to_public
 from book_app.modules.shelves import service as shelves_service
@@ -61,6 +64,13 @@ def _to_book_detail(view: books_service.BookDetailView) -> BookDetail:
     )
 
 
+def _attribution(supplied: InteractionAttribution | None) -> InteractionAttribution:
+    """Absent body, absent field and explicit `null` all mean the same
+    thing — the caller doesn't know where this action came from — so they
+    collapse to one value here rather than each route re-deciding."""
+    return supplied if supplied is not None else NO_ATTRIBUTION
+
+
 def _to_preference_state(state: UserBookState) -> PreferenceState:
     return PreferenceState(
         rating=internal_to_public(state.rating_value) if state.rating_value is not None else None,
@@ -76,6 +86,31 @@ def get_book(
     return _to_book_detail(view)
 
 
+@router.post("/{book_id}/opened", status_code=status.HTTP_204_NO_CONTENT)
+def record_book_opened(
+    book_id: int,
+    body: BookOpenedRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _csrf: None = Depends(require_csrf),
+) -> None:
+    """Record an intentional open of this book's detail view (rec-spec
+    §4.2). A dedicated write route on purpose — `GET /{book_id}` above
+    stays side-effect free (ADR-0015), so opening a book is recorded when
+    a reader actually chooses to, not whenever the endpoint is polled.
+
+    Best-effort from the UI's point of view: the frontend fires it without
+    awaiting it and navigates regardless, so a failure here costs an
+    analytics row, never a navigation.
+    """
+    interactions_service.record_book_opened(
+        db,
+        user_id=current_user.id,
+        book_id=book_id,
+        attribution=_attribution(body.attribution if body else None),
+    )
+
+
 @router.put("/{book_id}/rating", response_model=PreferenceState)
 def set_rating(
     book_id: int,
@@ -85,7 +120,11 @@ def set_rating(
     _csrf: None = Depends(require_csrf),
 ) -> PreferenceState:
     state = interactions_service.set_rating(
-        db, user_id=current_user.id, book_id=book_id, public_rating=body.rating
+        db,
+        user_id=current_user.id,
+        book_id=book_id,
+        public_rating=body.rating,
+        attribution=_attribution(body.attribution),
     )
     return _to_preference_state(state)
 
@@ -103,11 +142,17 @@ def remove_rating(
 @router.put("/{book_id}/not-interested", response_model=PreferenceState)
 def set_not_interested(
     book_id: int,
+    body: NotInterestedRequest | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _csrf: None = Depends(require_csrf),
 ) -> PreferenceState:
-    state = interactions_service.set_not_interested(db, user_id=current_user.id, book_id=book_id)
+    state = interactions_service.set_not_interested(
+        db,
+        user_id=current_user.id,
+        book_id=book_id,
+        attribution=_attribution(body.attribution if body else None),
+    )
     return _to_preference_state(state)
 
 
@@ -130,6 +175,10 @@ def sync_shelves(
     _csrf: None = Depends(require_csrf),
 ) -> ShelfIdsResponse:
     shelf_ids = shelves_service.sync_book_shelves(
-        db, user_id=current_user.id, book_id=book_id, shelf_ids=body.shelf_ids
+        db,
+        user_id=current_user.id,
+        book_id=book_id,
+        shelf_ids=body.shelf_ids,
+        attribution=_attribution(body.attribution),
     )
     return ShelfIdsResponse(shelf_ids=shelf_ids)

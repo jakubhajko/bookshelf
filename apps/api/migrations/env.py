@@ -12,6 +12,7 @@ from book_app.modules.auth import models as auth_models  # noqa: F401
 from book_app.modules.books import models as books_models  # noqa: F401
 from book_app.modules.interactions import models as interactions_models  # noqa: F401
 from book_app.modules.recommendations import models as recommendations_models  # noqa: F401
+from book_app.modules.search import models as search_models  # noqa: F401
 from book_app.modules.shelves import models as shelves_models  # noqa: F401
 from book_app.modules.users import models as users_models  # noqa: F401
 

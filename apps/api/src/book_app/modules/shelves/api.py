@@ -11,10 +11,12 @@ from sqlalchemy.orm import Session
 
 from book_app.core.dependencies import get_db
 from book_app.modules.auth.dependencies import get_current_user, require_csrf
+from book_app.modules.interactions.attribution import NO_ATTRIBUTION
 from book_app.modules.shelves import service as shelves_service
 from book_app.modules.shelves.models import Shelf
 from book_app.modules.shelves.repository import ShelfSummary
 from book_app.modules.shelves.schemas import (
+    ShelfBookAddRequest,
     ShelfBookItem,
     ShelfCreateRequest,
     ShelfPublic,
@@ -137,12 +139,21 @@ def list_shelf_books(
 def add_book(
     shelf_id: UUID,
     book_id: int,
+    body: ShelfBookAddRequest | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _csrf: None = Depends(require_csrf),
 ) -> None:
+    """Optional attribution here populates both the save event and
+    `shelf_books.source_surface` (rec-spec §4.3) — the column has existed
+    since Phase 4 with no caller ever supplying it."""
+    attribution = body.attribution if body and body.attribution else NO_ATTRIBUTION
     shelves_service.add_book_to_shelf(
-        db, user_id=current_user.id, shelf_id=shelf_id, book_id=book_id
+        db,
+        user_id=current_user.id,
+        shelf_id=shelf_id,
+        book_id=book_id,
+        attribution=attribution,
     )
 
 

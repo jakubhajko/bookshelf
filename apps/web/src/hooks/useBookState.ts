@@ -1,5 +1,6 @@
 import { type QueryClient, skipToken, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useLayoutEffect } from 'react'
+import type { InteractionAttribution } from '../api/attribution'
 import * as booksApi from '../api/books'
 import type { BookUserState } from '../api/books'
 import { queryKeys } from '../api/queryKeys'
@@ -116,11 +117,19 @@ function rollback(
   showToast(message, 'error')
 }
 
-/** Spec §5.3: setting a rating atomically clears Not Interested. */
-export function useSetRatingMutation(bookId: number) {
+/**
+ * Spec §5.3: setting a rating atomically clears Not Interested.
+ *
+ * `attribution` (rec-spec §4.3) is optional throughout these hooks and
+ * describes where the *action* was taken — a rating set from a Home
+ * recommendation card carries that card's request id and rank; the same
+ * rating set from a bookmarked detail page carries nothing. Both are
+ * valid; ADR-0015 forbids inventing the difference.
+ */
+export function useSetRatingMutation(bookId: number, attribution?: InteractionAttribution) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (rating: number) => booksApi.setRating(bookId, rating),
+    mutationFn: (rating: number) => booksApi.setRating(bookId, rating, attribution),
     onMutate: (rating) => optimisticallyPatch(queryClient, bookId, { rating, not_interested: false }),
     onError: (_error, _rating, context) =>
       rollback(queryClient, bookId, context, "Couldn't save your rating."),
@@ -138,11 +147,13 @@ export function useRemoveRatingMutation(bookId: number) {
   })
 }
 
-/** Spec §5.3: setting Not Interested atomically clears any rating. */
-export function useSetNotInterestedMutation(bookId: number) {
+/** Spec §5.3: setting Not Interested atomically clears any rating.
+ * rec-spec §7.1 makes this the strongest explicit negative signal, so
+ * which surface provoked it is especially worth recording. */
+export function useSetNotInterestedMutation(bookId: number, attribution?: InteractionAttribution) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: () => booksApi.setNotInterested(bookId),
+    mutationFn: () => booksApi.setNotInterested(bookId, attribution),
     onMutate: () => optimisticallyPatch(queryClient, bookId, { not_interested: true, rating: null }),
     onError: (_error, _vars, context) =>
       rollback(queryClient, bookId, context, "Couldn't mark this book Not Interested."),
@@ -178,10 +189,10 @@ export function useRemoveNotInterestedMutation(bookId: number) {
  * path (rarer — needs an actual request failure, not just a slow one) and
  * is left as a known, documented gap rather than solved here.
  */
-export function useSyncShelvesMutation(bookId: number) {
+export function useSyncShelvesMutation(bookId: number, attribution?: InteractionAttribution) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (shelfIds: string[]) => booksApi.syncBookShelves(bookId, shelfIds),
+    mutationFn: (shelfIds: string[]) => booksApi.syncBookShelves(bookId, shelfIds, attribution),
     onMutate: (shelfIds) => optimisticallyPatch(queryClient, bookId, { shelf_ids: shelfIds }),
     onError: (_error, _vars, context) =>
       rollback(queryClient, bookId, context, "Couldn't update shelves for this book."),

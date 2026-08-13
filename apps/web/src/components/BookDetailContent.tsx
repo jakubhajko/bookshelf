@@ -10,6 +10,7 @@ import {
   useSetNotInterestedMutation,
   useSetRatingMutation,
 } from '../hooks/useBookState'
+import { useOpenAttribution } from '../routing/modalNavigation'
 import { BookCover } from './BookCover'
 import { BookMasonryGrid } from './BookMasonryGrid'
 import { NotInterestedControl } from './NotInterestedControl'
@@ -57,6 +58,15 @@ function SimilarBooksSection({ bookId }: { bookId: number }) {
     queryFn: () => recommendationsApi.getSimilarRecommendations(bookId, { limit: 12 }),
   })
 
+  // `source_book_id` is the book being *viewed*, not the one acted on —
+  // the distinction that makes this surface's evidence interpretable
+  // later (rec-spec §4.2).
+  const attribution = {
+    surface: 'similar' as const,
+    recommendation_request_id: data?.request_id,
+    source_book_id: bookId,
+  }
+
   return (
     <section className="mt-10">
       <h2 className="text-base font-semibold text-text">Similar books</h2>
@@ -70,7 +80,7 @@ function SimilarBooksSection({ bookId }: { bookId: number }) {
           {/* Capped: this strip lives inside the detail dialog, roughly a
             * third of the viewport wide, so the full-width tier's column
             * count would shrink these covers to thumbnails. */}
-          <BookMasonryGrid items={data.items} maxColumns={4} />
+          <BookMasonryGrid items={data.items} maxColumns={4} attribution={attribution} />
         </div>
       )}
     </section>
@@ -85,9 +95,15 @@ function SimilarBooksSection({ bookId }: { bookId: number }) {
 export function BookDetailContent({ bookId }: { bookId: number }) {
   const { data: book, isLoading, isError, refetch } = useBookDetailQuery(bookId)
   const userState = useBookState(bookId)
-  const setRating = useSetRatingMutation(bookId)
+  // How this page was reached — a Home card, a search result, a similar
+  // -books strip, or (when undefined) a direct link. Actions taken here
+  // inherit it, so "rated after seeing it on Home" stays traceable
+  // (rec-spec §4.3).
+  const openAttribution = useOpenAttribution()
+  const detailAttribution = openAttribution ?? { surface: 'book_detail' as const }
+  const setRating = useSetRatingMutation(bookId, detailAttribution)
   const removeRating = useRemoveRatingMutation(bookId)
-  const setNotInterested = useSetNotInterestedMutation(bookId)
+  const setNotInterested = useSetNotInterestedMutation(bookId, detailAttribution)
   const removeNotInterested = useRemoveNotInterestedMutation(bookId)
 
   if (isLoading) {
@@ -178,7 +194,11 @@ export function BookDetailContent({ bookId }: { bookId: number }) {
 
             <div>
               <span className="mb-1 block text-xs font-medium text-text-muted">Shelves</span>
-              <ShelfSelectorPopover bookId={bookId} variant="full" />
+              <ShelfSelectorPopover
+                bookId={bookId}
+                variant="full"
+                attribution={detailAttribution}
+              />
             </div>
 
             <div>

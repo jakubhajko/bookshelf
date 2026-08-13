@@ -21,3 +21,16 @@ class EventType(StrEnum):
     NOT_INTERESTED_REMOVED = "not_interested_removed"
     SHELF_BOOK_ADDED = "shelf_book_added"
     SHELF_BOOK_REMOVED = "shelf_book_removed"
+    #: An *intentional* open of a book's detail view (rec-spec §4.2).
+    #: Written only from a dedicated endpoint the UI calls on a real click —
+    #: never as a side effect of `GET /books/{id}`, which stays pure so it
+    #: can't fire on prefetches, crawlers or a page refresh (ADR-0015).
+    #: Weak attention evidence, not a durable preference: rec-spec §7.1
+    #: keeps it out of long-term ALS and item-item seeding entirely.
+    BOOK_OPENED = "book_opened"
+    #: A *submitted* search, never a debounced autocomplete keystroke. The
+    #: query text lives in `search_queries`; this row is the event-log view
+    #: of the same act, carrying `search_query_id` so a later `book_opened`
+    #: can be traced back to the search that produced it. `book_id` is null
+    #: here — the first use of that column's nullability.
+    SEARCH_SUBMITTED = "search_submitted"
