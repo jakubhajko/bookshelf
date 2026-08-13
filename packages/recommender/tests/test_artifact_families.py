@@ -405,13 +405,17 @@ def test_tags_present_without_a_declared_version_are_rejected(
         load_item_metadata_artifact(storage, catalog=CATALOG)
 
 
-def test_a_declared_tags_version_with_no_tags_is_rejected(
+def test_a_declared_tags_version_with_no_tags_is_accepted(
     storage: LocalArtifactStorage,
 ) -> None:
+    """R3 rejected this as a build bug; R5 found it legitimate. A catalog
+    whose books have only bookkeeping shelves yields no usable tags, and the
+    version still correctly names the rules that produced that outcome."""
     _write_metadata(storage, config={TAGS_VERSION_CONFIG_KEY: "tags-v1"})
 
-    with pytest.raises(IncompatibleArtifactError, match="contains no tags"):
-        load_item_metadata_artifact(storage, catalog=CATALOG)
+    table = load_item_metadata_artifact(storage, catalog=CATALOG)
+
+    assert table.has_tags is False
 
 
 def test_tags_load_when_both_the_columns_and_the_version_are_present(

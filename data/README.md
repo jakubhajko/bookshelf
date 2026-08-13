@@ -91,10 +91,16 @@ artifacts/
   item_metadata/latest/      manifest.json  mapping.npz  items.npz
   als/latest/                manifest.json  mapping.npz  item_factors.npy
   item_cf/latest/            manifest.json  mapping.npz  neighbors.npz
+  content/latest/            manifest.json  mapping.npz  embeddings.npy
   evaluation/                <model>-<version>.json / .txt
 ```
 
-`content/` joins them in recommender phase R5.
+`content/` holds normalized `Qwen/Qwen3-Embedding-0.6B` vectors (512
+dimensions) over deterministic per-book text — title, author, genres,
+cleaned shelf tags and description. Building it downloads a ~1.2 GB model
+and takes about 88 minutes for the full catalog on Apple MPS; `--limit`
+gives a fast partial build for development. The encoder runs **only** here:
+the API loads the matrix, never the model.
 
 The two collaborative-filtering families train from
 `processed/interactions.parquet` and need the offline training dependencies:

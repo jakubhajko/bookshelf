@@ -6,11 +6,10 @@ or via ``make build-item-metadata``. Exports the per-book fields the ranker,
 the reason builder and interest inspection need at inference time, when
 PostgreSQL is off-limits (ADR-0014): title, primary author and broad genre.
 
-The cleaned shelf-tag columns are part of the format but stay empty until
-R5 builds the tag cleaner — the implementation plan's own instruction for
-this task ("create the artifact contract now and fill it there"). They are
-written as an empty CSR with ``tags_version = null``, which the loader reads
-as a declared absence rather than a corrupt artifact.
+The cleaned shelf-tag columns were written empty in R3 with
+``tags_version = null`` — a declared absence the loader accepts — and are
+filled here in R5, now that ``book_recommender.content.tags`` exists. The
+contract did not change; only the data did.
 
 ``primary_author_name`` and ``top_genre`` are read straight off ``books``
 rather than joined from ``book_authors``/``book_genres``: the import
@@ -23,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from book_recommender.artifacts import LocalArtifactStorage, write_artifact, write_item_metadata
@@ -32,6 +32,7 @@ from book_recommender.artifacts.item_metadata import (
     TAGS_VERSION_CONFIG_KEY,
 )
 from book_recommender.config import ITEM_METADATA
+from book_recommender.content.tags import TAG_CLEANING_VERSION, clean_tags
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -39,7 +40,7 @@ from book_app.core.config import get_settings
 from book_app.core.database import create_db_engine, create_session_factory
 from book_app.core.logging import configure_logging, get_logger
 from book_app.modules.books import repository as books_repository
-from book_app.modules.books.models import Book
+from book_app.modules.books.models import Book, BookCatalogShelfTag, CatalogShelfTag
 from book_app.modules.recommendations.artifact_build import (
     ArtifactBuildReport,
     new_model_version,
@@ -59,10 +60,22 @@ MAX_TITLE_CHARS = 300
 MAX_AUTHOR_CHARS = 200
 
 
-def collect_item_metadata(
-    session: Session,
-) -> tuple[list[tuple[int, str]], list[str], list[str], list[int], list[str]]:
-    """Returns ``(items, titles, authors, genre_codes, genre_vocab)``.
+@dataclass(frozen=True)
+class ItemMetadataColumns:
+    """Positional columns in ``model_item_index`` order."""
+
+    items: list[tuple[int, str]]
+    titles: list[str]
+    authors: list[str]
+    genre_codes: list[int]
+    genre_vocab: list[str]
+    tag_indptr: list[int]
+    tag_codes: list[int]
+    tag_vocab: list[str]
+
+
+def collect_item_metadata(session: Session) -> ItemMetadataColumns:
+    """Read every active book's card fields and cleaned tags.
 
     Ordered by ``book_id`` to match
     ``books_repository.get_active_catalog_identities``, so every family built
@@ -73,6 +86,7 @@ def collect_item_metadata(
         .where(Book.catalog_status == CatalogStatus.ACTIVE)
         .order_by(Book.id)
     )
+    tags_by_book = _cleaned_tags_by_book(session)
 
     items: list[tuple[int, str]] = []
     titles: list[str] = []
@@ -80,27 +94,74 @@ def collect_item_metadata(
     genre_codes: list[int] = []
     genre_vocab: list[str] = []
     code_by_genre: dict[str, int] = {}
+    tag_indptr: list[int] = [0]
+    tag_codes: list[int] = []
+    tag_vocab: list[str] = []
+    code_by_tag: dict[str, int] = {}
 
     for book_id, work_id, title, author, genre in session.execute(stmt):
         items.append((book_id, work_id))
         titles.append((title or "")[:MAX_TITLE_CHARS])
         authors.append((author or "")[:MAX_AUTHOR_CHARS])
+
         if genre is None:
             genre_codes.append(NO_GENRE_CODE)
-            continue
-        if genre not in code_by_genre:
-            code_by_genre[genre] = len(genre_vocab)
-            genre_vocab.append(genre)
-        genre_codes.append(code_by_genre[genre])
+        else:
+            if genre not in code_by_genre:
+                code_by_genre[genre] = len(genre_vocab)
+                genre_vocab.append(genre)
+            genre_codes.append(code_by_genre[genre])
 
-    return items, titles, authors, genre_codes, genre_vocab
+        for tag in tags_by_book.get(book_id, ()):
+            if tag not in code_by_tag:
+                code_by_tag[tag] = len(tag_vocab)
+                tag_vocab.append(tag)
+            tag_codes.append(code_by_tag[tag])
+        tag_indptr.append(len(tag_codes))
+
+    return ItemMetadataColumns(
+        items=items,
+        titles=titles,
+        authors=authors,
+        genre_codes=genre_codes,
+        genre_vocab=genre_vocab,
+        tag_indptr=tag_indptr,
+        tag_codes=tag_codes,
+        tag_vocab=tag_vocab,
+    )
+
+
+def _cleaned_tags_by_book(session: Session) -> dict[int, tuple[str, ...]]:
+    """Cleaned shelf tags per book, ordered by reader support.
+
+    The same cleaner the content builder uses, so the tags the ranker shows
+    are exactly the tags the encoder read (rec-spec §11.2).
+    """
+    stmt = (
+        select(BookCatalogShelfTag.book_id, CatalogShelfTag.name)
+        .join(CatalogShelfTag, CatalogShelfTag.id == BookCatalogShelfTag.tag_id)
+        .order_by(
+            BookCatalogShelfTag.book_id,
+            BookCatalogShelfTag.source_count.desc().nullslast(),
+            BookCatalogShelfTag.position,
+        )
+    )
+    raw: dict[int, list[str]] = {}
+    for book_id, name in session.execute(stmt):
+        raw.setdefault(book_id, []).append(name)
+    return {book_id: clean_tags(names) for book_id, names in raw.items()}
 
 
 def run_build(
     session_factory: sessionmaker[Session], *, artifact_root: Path, dry_run: bool = False
 ) -> ArtifactBuildReport:
     with session_factory() as session:
-        items, titles, authors, genre_codes, genre_vocab = collect_item_metadata(session)
+        columns = collect_item_metadata(session)
+        items = columns.items
+        genre_codes = columns.genre_codes
+        genre_vocab = columns.genre_vocab
+        authors = columns.authors
+        titles = columns.titles
         catalog_version = books_repository.get_catalog_version(session)
         model_version = new_model_version()
 
@@ -109,7 +170,14 @@ def run_build(
             "distinct_genres": len(genre_vocab),
             "items_without_genre": sum(1 for code in genre_codes if code == NO_GENRE_CODE),
             "items_without_author": sum(1 for author in authors if not author),
-            "tags_version": "unset (R5)",
+            "distinct_tags": len(columns.tag_vocab),
+            "tag_links": len(columns.tag_codes),
+            "items_without_tags": sum(
+                1
+                for index in range(len(items))
+                if columns.tag_indptr[index + 1] == columns.tag_indptr[index]
+            ),
+            "tags_version": TAG_CLEANING_VERSION,
         }
         preview = [
             {
@@ -145,10 +213,13 @@ def run_build(
                     authors=authors,
                     genre_codes=genre_codes,
                     genre_vocab=genre_vocab,
+                    tag_indptr=columns.tag_indptr,
+                    tag_codes=columns.tag_codes,
+                    tag_vocab=columns.tag_vocab,
                 )
             },
             config={
-                TAGS_VERSION_CONFIG_KEY: None,
+                TAGS_VERSION_CONFIG_KEY: TAG_CLEANING_VERSION,
                 "max_title_chars": MAX_TITLE_CHARS,
                 "max_author_chars": MAX_AUTHOR_CHARS,
             },

@@ -94,6 +94,8 @@ make build-source-similarity export resolved Goodreads similarity edges
 make build-item-metadata     build the compact item-metadata artifact
 make build-als               train + export ALS (needs setup-training)
 make build-item-cf           build item-item CF (needs setup-training)
+make build-content           build content embeddings (needs setup-training; ~88 min)
+make inspect-recommender-profile USERNAME=<name> [ARGS=--json]  inspect a reader's interests
 make e2e                     Playwright critical-flow tests (spec §13.5) — needs a running, migrated API
 make generate-api-client     frontend client from the OpenAPI schema
 ```
@@ -144,9 +146,8 @@ neither caught by any jsdom test before.
 
 Recommender phases R0-R4 have since added the interaction/attribution
 layer, the artifact substrate, and both collaborative-filtering families,
-taking the suite to 621 tests (185 apps/api unit + 143 recommender + 93
-frontend + 181 integration in the default environment; 16 trainer tests and
-11 CF builder tests additionally run with `make setup-training`). See
+and, in R5, the content-embedding space with multi-interest semantic
+profiling and a human-inspectable profile command. See
 [`docs/implementation/plan.md`](docs/implementation/plan.md) §3R for the
 per-phase record.
 

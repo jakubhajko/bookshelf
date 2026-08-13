@@ -48,6 +48,11 @@ dev = [
 training = [
     "implicit>=0.7.2",
     "scipy>=1.14",
+    # Offline text encoder for the content embeddings (ADR-0018). Pulls the
+    # whole torch/transformers stack — which is precisely why it is here and
+    # not in the runtime set: the API loads a matrix of vectors, never the
+    # model that produced them.
+    "sentence-transformers>=3.0",
 ]
 
 [build-system]

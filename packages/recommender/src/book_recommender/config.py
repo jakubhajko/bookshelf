@@ -70,6 +70,14 @@ ITEM_CF = ArtifactFamily(
     preprocessing_version="item-cf-topk-v1",
 )
 
+CONTENT = ArtifactFamily(
+    name="content",
+    directory="content/latest",
+    # Normalized Qwen3 embeddings over the deterministic book text — see
+    # book_recommender/content/ and cli/build_content_embeddings.py.
+    preprocessing_version="content-qwen3-512-v1",
+)
+
 ITEM_METADATA = ArtifactFamily(
     name="item_metadata",
     directory="item_metadata/latest",
@@ -79,9 +87,10 @@ ITEM_METADATA = ArtifactFamily(
     preprocessing_version="catalog-fields-v1",
 )
 
-#: Families that exist today. Content embeddings join this registry in R5.
+#: Every artifact family the system builds.
 FAMILIES: Mapping[str, ArtifactFamily] = {
-    family.name: family for family in (POPULARITY, SOURCE_SIMILARITY, ITEM_METADATA, ALS, ITEM_CF)
+    family.name: family
+    for family in (POPULARITY, SOURCE_SIMILARITY, ITEM_METADATA, ALS, ITEM_CF, CONTENT)
 }
 
 
@@ -276,3 +285,112 @@ EVALUATION_K_VALUES: tuple[int, ...] = (10, 20, 50)
 #: BM25, which rec-spec §10's "offline metrics plus coverage/popularity
 #: behavior" also points at. For ALS the two criteria agree on f128.
 SELECTION_K = max(EVALUATION_K_VALUES)
+
+
+# --- Content encoder (rec-spec §11.1, ADR-0018) -----------------------------
+
+
+@dataclass(frozen=True)
+class EncoderConfig:
+    """rec-spec §11.1: "Use a swappable encoder abstraction ... Do not
+    hard-code Qwen-specific behavior into serving contracts."
+
+    Every field here is recorded in the content artifact's manifest, because
+    changing any of them changes every vector and the artifact has to be able
+    to say which encoder produced it.
+    """
+
+    name: str
+    #: Output dimension. Qwen3 supports user-defined dimensions via Matryoshka
+    #: truncation, so this is a real knob rather than a property of the model.
+    dimension: int
+    #: Token cap per book. Not a model limit — Qwen3-Embedding-0.6B accepts
+    #: 32,768 — but a deliberate cost/quality choice: median book text is
+    #: ~180 tokens and the 90th percentile ~380, so 512 covers the corpus
+    #: while 32k would make the build ~40x slower for nothing.
+    max_sequence_length: int = 512
+    #: Measured on this catalog: batch 16 encodes 17.6 books/s on Apple MPS,
+    #: against 15.0 at batch 32 and 11.0 at batch 64.
+    batch_size: int = 16
+    #: rec-spec §11.1 wants a pinned revision "when possible". None means the
+    #: build records whatever the hub resolved, rather than claiming a pin it
+    #: does not have.
+    revision: str | None = None
+    #: Instruction/prompt applied to documents. Empty for V1: Qwen3 is
+    #: instruction-aware for *queries*, and the catalog side is plain
+    #: documents. Versioned so adding one later is visible.
+    prompt: str = ""
+    prompt_version: str = "noprompt-v1"
+
+
+#: rec-spec §11.1's stated default.
+ENCODER_DEFAULT = EncoderConfig(name="Qwen/Qwen3-Embedding-0.6B", dimension=512)
+
+
+# --- Semantic profiling (rec-spec §12.2, ADR-0016) --------------------------
+
+
+@dataclass(frozen=True)
+class InterestProfileConfig:
+    """Threshold-based interest clustering. rec-spec §12.2: "distance/
+    similarity threshold rather than fixed K" and "Do not force every user
+    into the same number of interests."
+    """
+
+    #: Average-linkage cosine *similarity* above which two clusters merge.
+    #: Higher means more, tighter interests. 0.55 is deliberately permissive:
+    #: on normalized Qwen3 vectors, unrelated books sit around 0.2-0.35 and
+    #: same-series books above 0.7, so this splits genuinely different
+    #: interests while keeping a coherent taste together.
+    merge_threshold: float = 0.55
+    #: rec-spec §12.2: "Cap the clustering input to a configurable
+    #: strongest/recent subset (for example around 100 items)".
+    max_evidence_items: int = 100
+    #: Below this, a cluster is treated as noise and folded into the
+    #: individual-books fallback rather than presented as an interest.
+    min_cluster_size: int = 2
+    #: Guard for the 1-2 item case (rec-spec §12.2's fallback ladder).
+    min_items_for_clustering: int = 3
+    #: How many interests may be returned. Bounds both work and the size of
+    #: the diagnostics a request can carry.
+    max_interests: int = 8
+    #: ``"centroid"`` or ``"medoid"`` — rec-spec §12.2 requires this stay
+    #: configurable "for future offline comparison".
+    query_strategy: str = "centroid"
+
+
+INTEREST_PROFILE_DEFAULT = InterestProfileConfig()
+
+
+@dataclass(frozen=True)
+class SignalWeights:
+    """Evidence strength per raw signal, for semantic profiling
+    (rec-spec §7.1's "Semantic profile" column).
+
+    These are the weights that turn *what a reader did* into *how much this
+    book counts* when building an interest. rec-spec §7: "All numeric values
+    below are configurable defaults, not universal truths."
+    """
+
+    taste_seed: float = 3.0
+    rating_9_10: float = 4.0
+    rating_8: float = 3.0
+    rating_7: float = 1.5
+    shelf_save: float = 3.0
+    #: rec-spec §7.1 puts opens at "low positive if recent" for the semantic
+    #: profile and explicitly not in long-term CF evidence.
+    book_opened: float = 0.5
+
+    def for_rating(self, internal_rating: int) -> float:
+        """Internal 1-10 scale. 6 and below contribute nothing positive —
+        rec-spec §7.1 calls 6 neutral and 1-5 negative."""
+        if internal_rating >= 9:
+            return self.rating_9_10
+        if internal_rating == 8:
+            return self.rating_8
+        if internal_rating == 7:
+            return self.rating_7
+        return 0.0
+
+
+SIGNAL_WEIGHTS_DEFAULT = SignalWeights()

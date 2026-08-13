@@ -984,8 +984,8 @@ repository valid, tested and resumable.
 | R1 | Interaction instrumentation, attribution, impression correctness | done |
 | R2 | Rich user context, profile version, cold-start taste seeds | done |
 | R3 | Artifact substrate, data validation, source-similarity export | done |
-| R4 | CF artifacts: ALS + item-item | **done, this pass** |
-| R5 | Content embeddings, multi-interest profiling, human inspection | not started |
+| R4 | CF artifacts: ALS + item-item | done |
+| R5 | Content embeddings, multi-interest profiling, human inspection | **done, this pass** |
 | R6 | Candidate-generator framework and the five generators | not started |
 | R7 | Surface config, weighted RRF, deterministic ranking, UX reranking | not started |
 | R8 | Pipeline engine integration, cold-start UI, serving switch | not started |
@@ -1687,7 +1687,7 @@ Tests (+93):
 No migration, no OpenAPI change, no frontend change: R3 touches no schema,
 no route and nothing under `apps/web`.
 
-### Phase R4 — Collaborative-filtering artifacts: ALS + item-item — **done, this pass**
+### Phase R4 — Collaborative-filtering artifacts: ALS + item-item — **done**
 
 Goal: build, evaluate, serialize and load both collaborative candidate
 sources. No serving behavior changed — `wiring.py` still loads only the
@@ -1885,12 +1885,200 @@ behaviour breaks.
 
 No migration, no OpenAPI change, no frontend change.
 
-### Phases R5-R9 — not started
+### Phase R5 — Content embeddings, multi-interest profiling and human inspection — **done, this pass**
+
+Goal: build the semantic item space and the user-interest profiler. No
+serving behavior changed — `wiring.py` still loads only popularity, and
+`FuturePipelineRecommendationEngine` is still the unused plug point. R6
+consumes what this phase produced.
+
+#### R5 checklist
+
+- [x] Deterministic versioned book-text builder: title, primary author,
+  broad genres, cleaned shelf tags, description last.
+- [x] Tested shelf-tag cleaning that strips bookkeeping/status/personal
+  tags; capped per book; rules versioned.
+- [x] Default encoder `Qwen/Qwen3-Embedding-0.6B`, dimension 512,
+  normalized, swappable, with encoder/revision/dimension/prompt/template/
+  tag versions all recorded in the manifest.
+- [x] Embedding build is offline; the API never loads the model — enforced
+  by a behavioural test, not just a grep.
+- [x] Compact exact-search-friendly artifact + semantic retrieval primitive
+  (batched dot products, efficient exclusion filtering, no vector DB).
+- [x] Explicit shelf profiles (weighted normalized per-shelf vectors).
+- [x] Pure `InterestProfiler`: threshold agglomerative cosine clustering,
+  no fixed K, with rec-spec §12.2's full fallback ladder.
+- [x] Centroid default, medoid computed, strategy configurable.
+- [x] Human-inspectable summaries with deterministic non-LLM labels.
+- [x] `make inspect-recommender-profile USERNAME=<name>` (+ `--json`),
+  calling the same profiling code as serving.
+- [x] Item-metadata tag columns filled — the contract R3 wrote empty.
+- [x] Full gates green; live build over the real 92,524-book catalog.
+
+#### The decision that shaped the phase
+
+rec-spec §12.2's clustering runs at **serving** time — a reader's interests
+are inferred when their batch is built. The obvious implementation imports
+scikit-learn's `AgglomerativeClustering`, and scikit-learn is a
+training-only dependency that ADR-0021 prunes out of the API environment.
+
+So it is ~40 lines of average-linkage clustering in pure NumPy over a cosine
+similarity matrix, bounded to ~100 items by rec-spec §12.2. That is the same
+reasoning applied for the third time: **every runtime counterpart of a
+training library is plain NumPy** — ALS fold-in without `implicit`,
+neighbour lookup without `scipy`, interest clustering without
+`scikit-learn`. ADR-0022 records it.
+
+#### Tag cleaning, against real data
+
+The catalog has 173,787 distinct tags over 1,699,225 links, and the top of
+that list mixes subject matter with filing systems: `fiction` (51,384
+books) sits beside `to-read`, `books-i-have`, `kindle-books`,
+`shelfari-wishlist` and `read-in-2011`. Embedding the second group would
+cluster books by how people file them.
+
+Matching is on **whole tokens, never substrings** — `own` must reject
+`own-to-read` without touching `downtown`; `read` must not take
+`spreadsheets` with it. On the live catalog:
+
+| Rejected because | Links |
+|---|---:|
+| bookkeeping token (`owned`, `kindle`, `favorites`, …) | 222,755 |
+| reading-log year (`read-in-2011`, `2012-reads`) | 33,051 |
+| bookkeeping phrase (`to-read`, `series`, …) | 27,954 |
+| challenge list (`1001-books-to-read-before-you-die`) | 25,002 |
+| too short / numeric | 24,199 |
+| **total rejected** | **332,962 (19.6%)** |
+
+What survives is recognisably thematic. A real example from the build:
+
+```text
+#1 'A Field Guide to American Houses'
+   architecture, reference, non-fiction, history, art, design, home,
+   real-estate, historic-preservation
+#2 'The Three Sisters'
+   plays, classics, drama, russian, russian-literature
+#3 'A Celtic Childhood'
+   ireland, memoir, autobiography, celtic-irish
+```
+
+#### Encoder cost, measured before committing to it
+
+Not a model limit — Qwen3-Embedding-0.6B accepts 32,768 tokens — but a cost
+decision. Median book text is ~722 characters (~180 tokens) and the 90th
+percentile ~1,519; 512 tokens covers the corpus.
+
+| max_seq | batch | books/s | full catalog |
+|---:|---:|---:|---:|
+| 512 | 8 | 17.1 | 90 min |
+| **512** | **16** | **17.6** | **88 min** |
+| 512 | 32 | 15.0 | 103 min |
+| 512 | 64 | 11.0 | 140 min |
+| 256 | 64 | 18.6 | 83 min |
+
+512/16 shipped: the 256-token variant is barely faster and truncates the
+90th-percentile description. The model download is a one-time ~1.2 GB;
+`--limit` exists for development.
+
+#### Two corrections this phase made to its own earlier work
+
+**The R4 dependency-boundary test was too blunt.** It asserted that *no*
+file under `apps/api/src` imports a text encoder, which R5's legitimate
+offline `content_encoding.py` broke. Rather than weaken it, it was split in
+two and made stronger: a source scan that allows exactly two named offline
+modules, plus a behavioural test that imports `book_app.main` in a
+subprocess and asserts no transformer module lands in `sys.modules`.
+
+Both halves were sabotage-verified. The scan fires when a non-designated
+module imports the stack. The behavioural test's *reach* was checked rather
+than assumed, and the docstring corrected: it covers the import graph
+reachable from `book_app.main`, so adding an encoder import to a CLI does
+**not** fail it — which is what the source scan is for. When R6 wires
+semantic generators into serving, `semantic_profile` enters that graph and
+the behavioural test starts covering it too.
+
+**An R3 validation rule was wrong.** The item-metadata loader rejected an
+artifact that declared a `tags_version` but contained no tags, on the
+theory that it indicated a build bug. Real data disproved it: a version
+means "these rules produced whatever is here", and *no usable tags* is a
+legitimate outcome — 501 of 92,524 books end up with none once bookkeeping
+shelves are stripped, and a small catalog can easily have none at all. The
+check was removed with the reasoning recorded inline; the opposite
+direction (tags with no version — unknown cleaning rules) still rejects.
+
+#### Decisions worth recording
+
+- **Description last in the template**, so encoder truncation removes
+  description tail rather than title or author.
+- **Absent fields are omitted**, not emitted as dangling labels — ~2,300
+  catalog books have no author, and `Author:` followed by nothing is noise
+  the encoder has to interpret.
+- **rec-spec §11.2's "do not embed" list is honoured literally**: no
+  ratings, popularity counts, ISBNs, page counts or ids. There is a test
+  asserting none of them reach the text, because embedding "4.27 average
+  rating" would let the encoder cluster by how well books sold.
+- **The loader refuses an artifact that is not normalized** — and checks a
+  deterministic sample of rows rather than trusting the manifest flag.
+  Retrieval treats the dot product as cosine, so unnormalized vectors would
+  rank by magnitude (longer descriptions first) and look plausible.
+- **The resolved encoder commit hash is recorded** when the hub supplies
+  one (`97b0c614…`), because loading by tag records only the tag and will
+  silently mean a different model later.
+- **The fallback ladder is implemented literally and the branch is
+  recorded.** "This reader has one interest" and "this reader had too little
+  evidence to cluster" look identical from outside and mean opposite
+  things, so `ProfileStrategy` names which happened.
+- **A term used by only one member of a multi-book interest cannot label
+  it** — it describes that book, not the interest. Ties break
+  alphabetically so a label cannot silently rename itself between runs.
+- **Summaries never contain vectors** (rec-spec §13), which is also what
+  keeps diagnostics from becoming the data dump CLAUDE.md warns about.
+- **One book with several signals counts once**, at its strongest weight —
+  rec-spec §7.1's "avoid uncontrolled double-counting". A saved *and*
+  10/10-rated book must not dominate a cluster by appearing twice.
+
+#### Changed files (R5)
+
+New in `packages/recommender/src/book_recommender/`:
+
+- `content/tags.py`, `content/text_builder.py` — versioned, pure.
+- `artifacts/content.py` — embedding artifact + exact batched retrieval.
+- `profiling/clustering.py` — pure-NumPy average-linkage clustering.
+- `profiling/interests.py` — evidence ranking, fallback ladder, shelf
+  profiles.
+- `profiling/summaries.py` — rec-spec §13's inspectable structures.
+
+New in `apps/api`:
+
+- `modules/recommendations/content_source.py` — catalog → encoder text
+  (no torch, so it is integration-tested normally).
+- `modules/recommendations/content_encoding.py` — the encoder wrapper, one
+  of only two modules allowed to import the training stack.
+- `modules/recommendations/semantic_profile.py` — signal policy → evidence.
+- `cli/build_content_embeddings.py`, `cli/inspect_profile.py`.
+
+Changed:
+
+- `config.py` — `CONTENT` family, `EncoderConfig`, `InterestProfileConfig`,
+  `SignalWeights`.
+- `cli/build_item_metadata.py` — fills the tag columns.
+- `artifacts/item_metadata.py` — the corrected validation rule.
+- `tests/test_dependency_boundaries.py` — split and hardened.
+- `pyproject.toml` — `sentence-transformers` in the `training` group.
+- `Makefile` — `build-content`, `inspect-recommender-profile`.
+- `docs/adr/0022-…md` — new.
+
+Tests (+112): 47 content text/tags, 29 interest profiling, 18 content
+artifact, 10 semantic profile, 8 content source (integration).
+
+No migration, no OpenAPI change, no frontend change.
+
+### Phases R6-R9 — not started
 
 Scope, tasks and per-phase acceptance criteria live in
 `RECOMMENDER_IMPLEMENTATION_PLAN.md` and are not duplicated here. Each phase
 appends its own record to this section as it lands, in the same shape as
-R0-R4 above: checklist, drift found, decisions/ADRs, changed files,
+R0-R5 above: checklist, drift found, decisions/ADRs, changed files,
 commands run with real results, and unresolved risks appended to §6.
 
 Standing constraints for every recommender phase (from `CLAUDE.md` and
@@ -3871,39 +4059,87 @@ conservative, reversible default and document it."
     enough to trigger it — worth knowing before someone debugs a "flaky"
     frontend regression that is really CPU starvation.
 
+### Recommender Phase R5
+
+104. **The tag rules are a hand-written blocklist, and blocklists leak.**
+     `_STATUS_TOKENS` covers the bookkeeping vocabulary visible in the top
+     of the live catalog's tag distribution, but 173,787 distinct tags have
+     a long tail nobody has read. Some filing tags certainly survive, and a
+     few thematic ones are certainly rejected — `library` blocks
+     `library-book` but would also block a genuine tag about libraries.
+     The rules are versioned and their rejections are reported by category
+     in the build, so a change is reviewable; what does not exist is
+     evidence about the tail.
+105. **The clustering threshold is untuned against real embeddings.**
+     `merge_threshold = 0.55` was reasoned from how normalized Qwen3
+     vectors typically distribute, not measured on this catalog with real
+     readers — no account here has enough varied evidence to exercise it
+     properly. It is the single number that decides whether a reader has
+     two interests or five, and R9's evaluation is where it should get a
+     real value.
+106. **The content artifact is 181 MB and dominates per-worker memory.**
+     Larger than every other family combined. Loading all six families is
+     what R9's profiling has to measure; `load_content_artifact(mmap=True)`
+     exists for when it does, but nothing has yet decided whether paging
+     from disk beats holding 181 MB resident per worker.
+107. **Rebuilding embeddings takes ~88 minutes**, so this is the one
+     artifact that cannot be casually regenerated, and any change to the
+     text template, tag rules or encoder invalidates all of it. All three
+     are versioned in the manifest so the invalidation is visible — but the
+     practical consequence is that tag-rule changes are expensive, which
+     argues for getting risk #104 right before the corpus grows.
+108. **Embeddings drift out of date silently, in one direction.** ADR-0020's
+     `work_id` resolution means a re-import does not corrupt the artifact —
+     books added since the build simply have no vector. The profiler reports
+     them (`unembedded_book_ids`) rather than hiding them, but nothing warns
+     an operator that the count is growing. Same shape as risk #95, now with
+     a much more expensive rebuild behind it.
+109. **Interest labels depend on tag coverage.** 501 of 92,524 books have no
+     cleaned tags and 3,098 have no genre, so an interest built entirely
+     from such books falls back to `Interest around "<title>"`. Correct, and
+     rec-spec §13's own suggested form — but it means label quality varies
+     with catalog metadata quality rather than with how good the clustering
+     was, which is worth knowing before reading a profile as a judgement on
+     the model.
+
 ## 7. Next phase
 
-**Recommender Phase R5 — content embeddings, multi-interest profiling and
-human inspection.** Scope and acceptance criteria are in
-`RECOMMENDER_IMPLEMENTATION_PLAN.md`; ADR-0016 governs multi-interest
-profiling and ADR-0018 the swappable offline encoder.
+**Recommender Phase R6 — the candidate-generator framework and the five
+generators.** Scope and acceptance criteria are in
+`RECOMMENDER_IMPLEMENTATION_PLAN.md`; ADR-0017 governs fusion and ranking,
+ADR-0016 the semantic profiling R6 consumes.
 
-What R5 inherits, so it does not rebuild it:
+R6 is the first phase since R2 that changes what a reader sees, and the
+first that puts any of R3-R5's artifacts on the request path. Everything it
+needs now exists and is tested in isolation:
 
-- the artifact substrate (ADR-0014/ADR-0020) — a new family is a module
-  under `book_recommender/artifacts/` plus an entry in
-  `book_recommender.config.FAMILIES`;
-- `save_array` with `mmap`, which the embedding matrix is the first payload
-  genuinely large enough to need (92,524 × 512 float32 ≈ 190 MB);
-- the `training` dependency group and its isolation guards (ADR-0021) —
-  `sentence-transformers` goes in beside `implicit`, and the two tests that
-  fail if it reaches a runtime dependency set already exist;
-- the **item-metadata artifact's tag columns**, written empty in R3 with
-  `tags_version: null` precisely so R5 fills a contract that is already
-  tested in both its empty and populated shapes.
+| Generator | What R6 wires up |
+|---|---|
+| popularity | `load_popularity_artifact` — already serving |
+| source similarity | `SourceSimilarityGraph.neighbor_book_ids` (R3) |
+| ALS CF | `AlsArtifact.fold_in` + `top_candidates` (R4) |
+| item-item CF | `ItemCfNeighbors.candidates_from_seeds` (R4) |
+| semantic/content | `ContentEmbeddings.search` + `build_semantic_profile` (R5) |
 
-The genuine unknown R5 carries is cost, not feasibility (risk #81): the
-transformer stack resolves, but `torch` has never been downloaded here and
-an embedding pass over 92,524 books has never been timed on this hardware.
-That is a far larger download than anything R4 needed, and it is the first
-thing to measure rather than assume.
+Three things R6 should keep in view, all recorded above with evidence:
 
-R5 has not been started. Do not begin it as part of an R4 pass.
+- **The generators are not interchangeable.** ALS is the most accurate and
+  by far the most concentrated (coverage 0.046, Gini 0.86); item-CF covers
+  far more catalog (0.547, Gini 0.374). Fusion weights that ignore this
+  import ALS's concentration into the feed (risk #98).
+- **Loading them all costs real memory** — the content artifact alone is
+  181 MB (risk #106). R6 is where per-worker footprint stops being
+  theoretical.
+- **Every generator must respect the exclusion sets the application
+  supplies**, which each artifact's retrieval path already implements and
+  tests; application-owned eligibility stays outside the engine.
 
-**The drift-item ledger is closed.** R1 closed items 4-8 and 14; R2 closed
-item 9; R3 closed 10, 11, 12 and 15; R4 closed item 13, the last one —
-`interactions.parquet` has a consumer. Everything the R0 architectural
-inspection found has been either fixed or superseded by an ADR.
+R6 has not been started. Do not begin it as part of an R5 pass.
+
+**The drift-item ledger stayed closed.** R4 emptied it; R5 added no new
+items — the two corrections it made (the R4 boundary test's bluntness and
+an R3 validation rule that real data disproved) were both fixed in the same
+pass rather than deferred.
 
 ### The application sequence is complete
 

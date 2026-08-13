@@ -42,11 +42,62 @@ def test_api_runtime_dependencies_exclude_the_training_stack() -> None:
         )
 
 
-def test_api_source_never_imports_a_text_encoder() -> None:
-    """The declared dependency set is only half of it — an import that
-    resolves transitively would load the model into the API process just the
-    same."""
-    for path in (APP_ROOT / "src").rglob("*.py"):
+#: The only modules allowed to import the training stack. Both are offline
+#: build code, reached from a CLI and never from a request path.
+OFFLINE_ONLY_MODULES = {
+    "modules/recommendations/cf_training.py",
+    "modules/recommendations/content_encoding.py",
+}
+
+_ENCODER_IMPORTS = ("import torch", "import sentence_transformers", "import transformers")
+
+
+def test_only_designated_offline_modules_import_the_training_stack() -> None:
+    """R5 legitimately needs an encoder module, so the rule is no longer
+    "nobody imports it" — it is "only these two files do, and they are
+    offline builders". Widening this list should be a deliberate act."""
+    source_root = APP_ROOT / "src"
+    for path in source_root.rglob("*.py"):
+        relative = path.relative_to(source_root / "book_app").as_posix()
         text = path.read_text()
-        for forbidden in ("import torch", "import sentence_transformers", "import transformers"):
-            assert forbidden not in text, f"{path} must not import a text encoder ({forbidden!r})"
+        for forbidden in _ENCODER_IMPORTS:
+            if forbidden in text:
+                assert relative in OFFLINE_ONLY_MODULES, (
+                    f"{relative} imports the training stack ({forbidden!r}); only "
+                    f"{sorted(OFFLINE_ONLY_MODULES)} may (ADR-0018/ADR-0021)"
+                )
+
+
+def test_importing_the_api_does_not_pull_in_a_text_encoder() -> None:
+    """The behavioural guarantee a source grep cannot give: after importing
+    the FastAPI application, no transformer module is in ``sys.modules``.
+
+    This is what ADR-0018 promises — "The API must not load the 0.6B text
+    model to serve recommendations."
+
+    Scope, stated precisely because it was checked rather than assumed: this
+    covers the *import graph reachable from* ``book_app.main``. Adding an
+    encoder import to a module the app does not import — a CLI, or
+    ``semantic_profile`` while nothing in the serving path uses it yet —
+    would not fail here; that is what
+    ``test_only_designated_offline_modules_import_the_training_stack``
+    covers. The two together are the guard. When R6 wires semantic
+    generators into serving, ``semantic_profile`` enters this graph and this
+    test starts covering it too.
+    """
+    import subprocess
+    import sys
+
+    probe = (
+        "import book_app.main, sys; "
+        "loaded = [m for m in sys.modules "
+        "if m.split('.')[0] in {'torch', 'transformers', 'sentence_transformers'}]; "
+        "print(','.join(sorted(loaded)))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+
+    assert result.stdout.strip() == "", (
+        f"importing the API loaded transformer modules: {result.stdout.strip()}"
+    )

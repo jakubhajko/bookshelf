@@ -10,7 +10,8 @@ LOCAL_PGHOST := localhost
         db-start db-stop db-shell \
         migrate import-data import-data-dry-run seed-demo build-popularity \
         build-source-similarity build-item-metadata build-recommender-artifacts \
-        build-als build-item-cf setup-training \
+        build-als build-item-cf build-content setup-training \
+        inspect-recommender-profile evaluate-content \
         test lint typecheck e2e generate-api-client
 
 help: ## Show this help
@@ -102,7 +103,17 @@ build-als: ## Train and export the ALS artifact (needs 'make setup-training')
 build-item-cf: ## Build the item-item CF artifact (needs 'make setup-training')
 	cd apps/api && uv run --group training python -m book_app.cli.build_item_cf --sweep
 
-build-recommender-artifacts: build-popularity build-source-similarity build-item-metadata build-als build-item-cf ## Build every recommender artifact currently implemented
+build-content: ## Build content embeddings (needs 'make setup-training'; ~88 min for 92k books)
+	cd apps/api && uv run --group training python -m book_app.cli.build_content_embeddings --progress
+
+evaluate-content: ## Evaluate content embeddings against Goodreads edges + coherence (rec-spec §23.2)
+	cd apps/api && uv run python -m book_app.cli.evaluate_content $(ARGS)
+
+inspect-recommender-profile: ## Inspect a user's semantic interest profile: USERNAME=<name> [ARGS=--json]
+	@test -n "$(USERNAME)" || (echo "error: USERNAME=<name> is required" >&2; exit 1)
+	cd apps/api && uv run python -m book_app.cli.inspect_profile --username "$(USERNAME)" $(ARGS)
+
+build-recommender-artifacts: build-popularity build-source-similarity build-item-metadata build-als build-item-cf build-content ## Build every recommender artifact currently implemented
 	@echo "Recommender artifacts rebuilt. Note: 'make import-data' invalidates them (see ADR-0014)."
 
 ## --- Quality gates -----------------------------------------------------------

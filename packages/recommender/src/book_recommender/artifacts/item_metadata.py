@@ -202,10 +202,12 @@ def _validate_tags(
     bundle: ArtifactBundle, tag_codes: npt.NDArray[np.int64], tag_vocab: tuple[str, ...]
 ) -> None:
     declared_version = bundle.manifest.config.get(TAGS_VERSION_CONFIG_KEY)
-    if declared_version is not None and tag_codes.size == 0:
-        raise IncompatibleArtifactError(
-            f"manifest declares tags_version={declared_version!r} but the artifact contains no tags"
-        )
+    # R3 also rejected the reverse — "declares a version but ships no tags" —
+    # as a build bug. R5 removed that check when real data showed it wrong: a
+    # version means "these rules produced whatever tags are here", and *no
+    # usable tags* is a legitimate outcome. On the live catalog 501 of 92,524
+    # books end up with none once bookkeeping shelves are stripped, and a
+    # small catalog can easily have none at all.
     if tag_codes.size and declared_version is None:
         raise IncompatibleArtifactError(
             "artifact contains tags but declares no tags_version — the cleaning "

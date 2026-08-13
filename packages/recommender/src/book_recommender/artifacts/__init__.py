@@ -28,6 +28,11 @@ from book_recommender.artifacts.als import (
     load_als_artifact,
     write_item_factors,
 )
+from book_recommender.artifacts.content import (
+    ContentEmbeddings,
+    load_content_artifact,
+    write_embeddings,
+)
 from book_recommender.artifacts.item_cf import (
     ItemCfNeighbors,
     ItemNeighbor,
@@ -82,6 +87,7 @@ __all__ = [
     "ArtifactBundle",
     "ArtifactFile",
     "ArtifactManifest",
+    "ContentEmbeddings",
     "CatalogSnapshot",
     "ItemCfNeighbors",
     "ItemMapping",
@@ -102,6 +108,7 @@ __all__ = [
     "build_csr",
     "load_als_artifact",
     "load_artifact_bundle",
+    "load_content_artifact",
     "load_item_cf_artifact",
     "load_item_metadata_artifact",
     "load_popularity_artifact",
@@ -109,6 +116,7 @@ __all__ = [
     "resolve_item_mapping",
     "verify_artifact_files",
     "write_artifact",
+    "write_embeddings",
     "write_item_cf_neighbors",
     "write_item_factors",
     "write_item_metadata",
