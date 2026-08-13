@@ -48,6 +48,25 @@ class SemanticProfile:
     def is_empty(self) -> bool:
         return self.interests.is_empty and not self.shelves
 
+    def combined(self) -> InterestProfile:
+        """Interests and shelf profiles in one :class:`InterestProfile`.
+
+        The two are built separately — clustering does not know about
+        shelves — but every consumer wants them together: the inspection
+        summary, and the semantic candidate generator, which issues one
+        query per interest *and* per shelf (rec-spec §20.1). Kept here so
+        there is one definition of "the reader's full semantic profile"
+        rather than each caller re-assembling it slightly differently.
+        """
+        return InterestProfile(
+            strategy=self.interests.strategy,
+            clusters=self.interests.clusters,
+            shelves=self.shelves,
+            unembedded_book_ids=self.interests.unembedded_book_ids,
+            evidence_count=self.interests.evidence_count,
+            config=self.interests.config,
+        )
+
 
 def collect_evidence(
     context: UserContext, *, weights: SignalWeights = SIGNAL_WEIGHTS_DEFAULT
@@ -130,12 +149,4 @@ def summarize(
             tags=row.tags,
         )
 
-    combined = InterestProfile(
-        strategy=profile.interests.strategy,
-        clusters=profile.interests.clusters,
-        shelves=profile.shelves,
-        unembedded_book_ids=profile.interests.unembedded_book_ids,
-        evidence_count=profile.interests.evidence_count,
-        config=profile.interests.config,
-    )
-    return summarize_profile(combined, descriptors, shelf_names=shelf_names)
+    return summarize_profile(profile.combined(), descriptors, shelf_names=shelf_names)

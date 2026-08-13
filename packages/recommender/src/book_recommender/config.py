@@ -394,3 +394,94 @@ class SignalWeights:
 
 
 SIGNAL_WEIGHTS_DEFAULT = SignalWeights()
+
+
+@dataclass(frozen=True)
+class CollaborativeSignalWeights:
+    """Evidence strength per raw signal for the two CF generators
+    (rec-spec §7.1's "ALS V1" and "Item-item seed" columns).
+
+    Separate from :class:`SignalWeights` because rec-spec §7.1 gives these
+    their own columns, and they differ from the semantic column in one
+    decisive place: **an open is worth nothing here.** The table says "omit
+    from long-term ALS V1" and "normally omit from long-term item-CF" for
+    `book opened`, while the semantic profile takes it as "low positive if
+    recent". Long-term collaborative preference is not something a reader
+    expresses by glancing at a page.
+
+    The two CF columns are identical row by row in rec-spec §7.1, so one
+    type serves both rather than two that would have to be kept in sync.
+    ALS reads these as implicit-feedback *confidence*; item-CF reads them as
+    *seed weight*. Same evidence, two consumers.
+
+    Negative evidence is absent by construction: ratings of 6 and below
+    return 0.0, and Not Interested is a hard exclusion the application
+    enforces (rec-spec §9.2: "Do not require negative ALS training to make
+    those disappear").
+    """
+
+    taste_seed: float = 2.0
+    rating_9_10: float = 4.0
+    rating_8: float = 3.0
+    rating_7: float = 1.5
+    shelf_save: float = 3.0
+    #: rec-spec §7.1: opens are omitted from long-term CF evidence entirely.
+    #: Present and zero rather than absent, so the policy is visible here
+    #: instead of being an unexplained gap a later edit might "fix".
+    book_opened: float = 0.0
+
+    def for_rating(self, internal_rating: int) -> float:
+        """Internal 1-10 scale. 6 and below contribute nothing: rec-spec
+        §7.1 calls 6 neutral, and 1-5 is "omit from ALS V1" / "do not seed"
+        rather than negative confidence."""
+        if internal_rating >= 9:
+            return self.rating_9_10
+        if internal_rating == 8:
+            return self.rating_8
+        if internal_rating == 7:
+            return self.rating_7
+        return 0.0
+
+
+COLLABORATIVE_WEIGHTS_DEFAULT = CollaborativeSignalWeights()
+
+
+@dataclass(frozen=True)
+class GeneratorConfig:
+    """Generator-local tunables (rec-spec §16, §26).
+
+    Deliberately *not* the per-surface quotas and RRF weights. rec-spec §17
+    is explicit that "generator quotas and RRF weights are surface
+    configuration, not hard-coded inside generators", and surface
+    configuration is Phase R7's subject. What lives here is the knobs a
+    generator needs to do its own job regardless of which surface asked:
+    how many seeds it will consider, how deep it reads each neighbour list,
+    how many semantic queries it will issue. How *many candidates* to return
+    comes from the caller, per request.
+    """
+
+    #: Upper bound on seed books fed to the CF and source generators. Bounds
+    #: work for a reader with thousands of saves; the seed selector takes the
+    #: strongest first, so a cap costs the weakest evidence.
+    max_seed_books: int = 40
+    #: How far down each book's source-similarity edge list to read. The
+    #: graph averages ~5 edges per book that has any, so this is a ceiling
+    #: that rarely binds rather than a routine truncation.
+    source_neighbors_per_seed: int = 20
+    #: How far into each item's precomputed neighbour row to read. The
+    #: artifact is built at top-K 100; reading all of it is the default.
+    item_cf_neighbors_per_seed: int | None = None
+    #: Cap on distinct semantic query vectors per request. Interest clusters
+    #: are already bounded by ``InterestProfileConfig.max_interests``; this
+    #: also bounds shelf profiles, which are bounded only by how many
+    #: shelves a reader made.
+    max_semantic_queries: int = 12
+    #: Candidates scoring at or below this cosine similarity are dropped
+    #: before ranking. Unrelated normalized Qwen3 vectors sit around 0.2-0.35
+    #: (see ``InterestProfileConfig.merge_threshold``), so this only removes
+    #: results that are semantically unrelated to the query — which happens
+    #: when a query is served from a thin profile.
+    semantic_min_score: float = 0.35
+
+
+GENERATOR_CONFIG_DEFAULT = GeneratorConfig()

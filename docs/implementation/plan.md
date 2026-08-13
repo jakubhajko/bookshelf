@@ -2095,7 +2095,152 @@ artifact, 10 semantic profile, 8 content source (integration).
 
 No migration, no OpenAPI change, no frontend change.
 
-### Phases R6-R9 — not started
+### Phase R6 — Candidate-generator framework and the five generators — **done, this pass**
+
+Goal: turn five incompatible retrieval mechanisms into five comparable
+ranked lists. **No serving behavior changed** — `wiring.py` still holds
+zero references to any generator, and nothing calls the layer yet. R7 fuses
+these lists; R8 puts the result on the request path.
+
+#### R6 checklist
+
+- [x] Structural `CandidateGenerator` protocol, matching the existing
+  engine/provider style.
+- [x] `Candidate` with book id, raw score, 1-based rank, provenance and
+  compact diagnostics; `GeneratorResult` with a closed status taxonomy.
+- [x] Generator ids centralized in one `StrEnum`.
+- [x] Artifact + immutable request only: no DB, no clock, no I/O.
+- [x] Deterministic for fixed request/context/artifacts/config — tested per
+  generator, not assumed.
+- [x] All five generators: ALS, item-item CF, semantic, source similarity,
+  popularity.
+- [x] Semantic runs multiple query strategies with distinct provenance:
+  inferred interest, explicit shelf, target shelf, source book, global
+  fallback centroid.
+- [x] Over-retrieval count supplied per request by the caller, not decided
+  by the generator (rec-spec §17).
+- [x] Per generator: exclusions honoured, empty profile/artifact degrades,
+  provenance reported, correct surfaces, no internal duplicates.
+- [x] Full gates green; live smoke test over the real 92,524-book artifacts
+  and a real reader (§5o).
+
+#### Correcting this plan's own R6 handoff note
+
+§7 previously said R6 "is the first phase since R2 that changes what a
+reader sees, and the first that puts any of R3-R5's artifacts on the
+request path." That was wrong on both counts.
+`RECOMMENDER_IMPLEMENTATION_PLAN.md` puts the serving switch in Phase 8,
+and R6's own scope is the generator layer plus tests. R6 changes nothing a
+reader sees; it is the last phase that can be added without touching
+serving. The note has been rewritten in §7.
+
+#### The three decisions that shaped the phase (ADR-0023)
+
+**An empty list has four different meanings**, and rec-spec §27 needs them
+distinguishable: missing artifact, cold reader, wrong surface, or a real
+empty result. `GeneratorStatus` names which. "ALS artifact absent" is an
+alarm; "this reader is cold" is the cold-start path working correctly.
+
+**Rank is computed in exactly one function.** ADR-0017 fuses with
+`weight / (rrf_k + rank)`, so a 0-based rank, a gap left by an excluded
+book, or one book at two ranks each silently rescale that book's fused
+score. `rank_all` is the only place any of it happens.
+
+**The semantic generator interleaves rather than merges by score.** One
+query per interest and per shelf, round-robin so every query places its
+best result before any places its second. Merging by cosine would let the
+tightest cluster take every slot — a reader with a dense Dune shelf and a
+sparse poetry shelf would get Dune, which is precisely what ADR-0016's
+multi-interest profiling exists to prevent. The deliberate consequence:
+**semantic `score` is not monotonically decreasing down its own list**,
+because rank is interleave position. Nothing downstream may sort by it.
+
+#### What the live smoke test showed that unit tests could not
+
+Run against the real artifacts and the real reader (§5o). Two things were
+worth the run on their own:
+
+**item-CF is saturated at the top.** 788,772 of its 7,606,357 edges —
+**10.4%** — have a similarity of *exactly* 1.0, and the 90th percentile of
+the whole distribution is already 1.0. Aggregation multiplies by a seed
+weight, so a large group of candidates lands on exactly 3.0 and the order
+within it is decided by the `book_id` tiebreak. Since RRF reads only rank,
+**that arbitrary tiebreak is the signal**. It shows in the output: item-CF's
+top six for this reader are children's poetry, regency romance and obscure
+mysteries, while ALS returns *The Return of the King*, *The Two Towers* and
+*Ender's Game* for the same evidence. Risk #111.
+
+**The catalog contains near-duplicate works.** Similar-to-*Dune* returns
+`#67405 'Dune *'` by Frank Herbert at rank 6 — a genuinely separate row
+with its own `work_id` (49578285 against 3634639) and 69 ratings against
+16,541. Not an import bug and not a generator bug: the nearest neighbour of
+*Dune* really is another edition of *Dune*. It is a concrete instance of
+what ADR-0017's near-duplicate reranking exists for, which is no longer
+theoretical. Risk #112.
+
+#### A fix this phase made to its own new code
+
+The source-similarity generator originally broke score ties on `book_id`
+alone, copying the artifact retrieval paths. The live run showed why that
+is not good enough here: a single rank-0 edge from a shelf save is worth
+exactly 3.0, so ties are common and `book_id` order is catalog-insertion
+order. It now breaks ties by **how many seeds agreed** first — two seeds
+independently pointing at a book is evidence about that book, a low id is
+evidence about nothing — and falls back to `book_id` last, so the result
+stays deterministic. Sabotage-verified in both directions.
+
+Honestly reported: on this reader's real data the visible order did not
+change, because those particular ties each had one contributing seed. The
+test that proves the behaviour is a fixture case, not the live run.
+
+#### Decisions worth recording
+
+- **`NOT_APPLICABLE` rather than a zero weight** for ALS on Similar Books.
+  rec-spec §20.3 says global personalization is *absent* there; expressing
+  absent as a weight would leave a generator that still folds in a factor,
+  still scores 92k items, and could be switched back on by a config edit
+  nobody would read as changing what Similar Books means.
+- **Seed selection is shared** across ALS, item-CF and source similarity,
+  so the three cannot drift into three notions of "seed" whose provenance
+  is then incomparable at fusion.
+- **Max-dominant combination**, matching R5: a book both saved and rated
+  10/10 counts once at its strongest weight (rec-spec §7.1).
+- **`CollaborativeSignalWeights` is separate from `SignalWeights`** because
+  rec-spec §7.1 gives the CF columns their own values and they differ in one
+  decisive row — an open is worth 0.0 to long-term CF.
+- **Surface quotas and RRF weights are absent from this package entirely.**
+  They are R7's, and a placeholder would be a contract before anything could
+  honour it.
+- **Exclusions are applied twice** on four generators — in the artifact
+  retrieval path (before top-K, so a heavily-excluded reader still gets a
+  full page) and again in `rank_all`. Sabotaging `rank_all`'s filter fails
+  only the popularity test, which is the honest shape of that guarantee.
+
+#### Changed files (R6)
+
+New in `packages/recommender/src/book_recommender/generators/`:
+
+- `base.py` — ids, status taxonomy, `Candidate`, `GeneratorResult`,
+  `GeneratorRequest`, the protocol, `rank_all`, `interleave`.
+- `seeds.py` — per-surface seed policy and the combination rule.
+- `als.py`, `item_cf.py`, `semantic.py`, `source_similarity.py`,
+  `popularity.py`.
+
+Changed:
+
+- `config.py` — `CollaborativeSignalWeights`, `GeneratorConfig`.
+- `apps/api/.../semantic_profile.py` — `SemanticProfile.combined()`, which
+  the inspection summary already built inline and the semantic generator
+  needs; one definition instead of two.
+- `docs/adr/0023-candidate-generator-contract.md` — new.
+
+Tests (+96): 26 framework/seed policy, 70 generator behaviour, over a
+shared twelve-book fixture world whose artifacts are written and loaded
+through the real loaders.
+
+No migration, no OpenAPI change, no frontend change, no serving change.
+
+### Phases R7-R9 — not started
 
 Scope, tasks and per-phase acceptance criteria live in
 `RECOMMENDER_IMPLEMENTATION_PLAN.md` and are not duplicated here. Each phase
@@ -3268,6 +3413,137 @@ five non-popularity loaders and two to `load_popularity_artifact`;
 the semantic space and the profiler; putting either on the request path is
 R6.
 
+## 5o. Recommender Phase R6 validation commands and results
+
+### Gates
+
+```bash
+make test
+#   apps/api             212 passed   (unchanged — no application code added)
+#   packages/recommender 334 passed   (was 238: +96 generator tests)
+#   apps/web              93 passed   (unchanged — no frontend work)
+make lint        # clean, all four targets
+make typecheck   # clean: 140 + 63 source files, tsc -b
+uv run --project apps/api pytest tests/integration -q
+#                        206 passed in 20.39s   (unchanged)
+```
+
+No migration, no OpenAPI change, no frontend change, so
+`make generate-api-client` and `make e2e` were not re-run. E2E last verified
+green in §5j.
+
+**Serving is unchanged, and that is the phase's own acceptance criterion.**
+`grep -c "generators\|CandidateGenerator" wiring.py` returns 0. R6 adds a
+layer nothing calls; fusion is R7 and the serving switch is R8.
+
+### Sabotage verification
+
+Each of these was made to fail against deliberately broken code and then
+restored, because a regression test that has never failed is a claim, not a
+guarantee:
+
+| Sabotage | Test that caught it |
+|---|---|
+| `interleave` stops the round-robin once `limit` candidates exist | the query-agreement count test |
+| ALS stops excluding its own seed books | seeds-never-recommended-back |
+| semantic ignores the target shelf and uses global interests | shelf-queries-target-only |
+| `rank_all` stops applying exclusions | exclusion test, **popularity only** |
+| source similarity reverts to a `book_id`-only tiebreak | the agreement-tiebreak test |
+
+The fourth is the informative one: the other four generators also filter in
+their artifact retrieval paths, so only popularity depends on `rank_all`'s
+filter alone. That is the honest shape of the guarantee, and it is recorded
+rather than presented as five independent checks.
+
+One test was rewritten after its first sabotage did nothing. It claimed the
+query count survives past the limit, but the sabotage broke only the inner
+loop and `contributors` was still collected, so the test passed against
+broken code. The fixture was rebuilt so the second query reaches the book
+*after* the limit is already met, and the sabotage then failed it.
+
+### Live smoke test — the five generators over the real artifacts
+
+Real reader (`Jakub`, 18 evidence books), real 92,524-book artifacts, three
+surfaces, `count=8`. Invariants asserted in-process rather than eyeballed:
+no duplicates, no excluded book, dense 1-based ranks, count respected.
+
+```text
+artifact load (6 families): 0.72s
+profile: strategy=clustered interests=4 shelves=2
+exclusions: 18 books
+```
+
+**HOME**
+
+```text
+als               ok    6.6 ms   seeds=18 factors=128
+  0.4471 'The Return of the King'      — J.R.R. Tolkien
+  0.4470 'The Two Towers'              — J.R.R. Tolkien
+  0.3415 'Harry Potter and the Order of the Phoenix'
+  0.2429 'The Silmarillion'            0.2262 "Ender's Game"
+
+semantic          ok   10.2 ms   queries=6, all 6 with hits
+  0.8090 'Chapterhouse: Dune'   via shelf:0530e4fc  (also interest:i1)
+  0.8313 'The Harry Potter Collection 1-4'  via interest:i0 (also shelf:05a42dd2)
+  0.7771 'Count Zero (Sprawl, #2)'          via interest:i2
+  0.7930 'A Guide to the Star Wars Universe' via interest:i3
+
+item_cf           ok    1.0 ms   seeds=18
+  3.6109 "New Treasury of Children's Poetry"
+  3.0000 'Which Doctor'   3.0000 'Pride & Joy'   3.0000 'Alias'
+
+source_similarity ok    0.1 ms   seeds=18, 17 with edges, pool=81
+  6.0000 'House Corrino (Prelude to Dune #3)'
+  3.0000 'Objectivism: The Philosophy of Ayn Rand'  ... (ties)
+
+popularity        ok    0.0 ms   ranking_size=92524
+  4.7510 'Toda Mafalda'   4.7479 'Calvin and Hobbes' ...
+```
+
+All four of the reader's interests and both shelves produced hits, and the
+interleave put one of each in the top four — Dune, Harry Potter, cyberpunk
+(*Count Zero*, from the *Neuromancer* interest) and Star Wars. `also_from`
+records where two queries agreed. This is ADR-0016's multi-interest
+profiling doing visibly what it was built for.
+
+**SHELF 'Sci-fi'** — semantic issued exactly one query, `target_shelf`, and
+returned *Chapterhouse: Dune*, *Heretics of Dune*, *House Atreides*,
+*The Machine Crusade*. The reader's fantasy interest did not leak in
+(rec-spec §20.2).
+
+**SIMILAR to #58203 'Dune'** — `als` reported `not_applicable`, as
+rec-spec §20.3 requires. Semantic returned the Dune corpus from the source
+book's own vector; source similarity returned *A Deepness in the Sky*,
+*Lord of Light*, *The Fall of Hyperion*.
+
+**Latency.** The slowest generator is semantic at 10.2 ms for six batched
+queries over 92,524 books; ALS is 6.6 ms including the fold-in solve. The
+whole five-generator pass is under 20 ms against a ~5 s provider timeout
+(rec-spec §24), so fusion, ranking and reranking have the budget they need.
+
+### The two findings that justified running it
+
+```text
+item_cf edges         : 7,606,357
+similarity == 1.0     :   788,772  (10.37%)
+quantiles             : p50 0.1371 | p90 1.0000 | p99 1.0000
+```
+
+The top decile of item-CF's similarity distribution is completely flat, so
+after multiplying by a seed weight, large groups of candidates tie at
+exactly 3.0 and the `book_id` tiebreak decides their order — which RRF then
+reads as signal (risk #111).
+
+```sql
+SELECT id, title, work_id, ratings_count FROM books WHERE id IN (58203, 67405);
+  58203 | Dune   | 3634639  | 16541
+  67405 | Dune * | 49578285 |    69
+```
+
+Two distinct works, so the near-duplicate is in the source data, not the
+import. The nearest semantic neighbour of *Dune* legitimately includes
+another *Dune* (risk #112).
+
 ## 6. Risks and assumptions
 
 Recorded per CLAUDE.md: "For a genuinely unspecified detail, choose a
@@ -4349,44 +4625,92 @@ conservative, reversible default and document it."
      should not paper over this with a semantic-only surface; R9 should
      measure it.
 
+### Recommender Phase R6
+
+111. **item-CF's rank is substantially arbitrary at the top, and rank is
+     all RRF sees.** 788,772 of 7,606,357 edges (10.37%) have a similarity
+     of exactly 1.0 and the 90th percentile is already 1.0, so aggregation
+     lands large candidate groups on an identical score and the `book_id`
+     tiebreak orders them. On the live reader this produces children's
+     poetry and regency romance in item-CF's top six while ALS returns
+     Tolkien for the same evidence. Two consequences for R7: an RRF weight
+     tuned on item-CF's *coverage* (0.547, the reason it is in the mix)
+     imports this noise at full strength, and the fix is probably a better
+     aggregation tiebreak in R4's `candidates_from_seeds` — agreement
+     count, or a similarity floor — rather than a smaller weight. Not
+     changed in R6, which does not own that function.
+112. **The catalog contains near-duplicate works, and similarity finds
+     them.** `#58203 'Dune'` and `#67405 'Dune *'` are separate rows with
+     separate `work_id`s (16,541 ratings against 69). Similar-to-Dune
+     returns the other Dune at rank 6, correctly — it really is the nearest
+     neighbour. ADR-0017's near-duplicate reranking is the intended answer
+     and is now known to be load-bearing rather than theoretical. Unknown:
+     how many such pairs exist; nothing has counted them.
+113. **The semantic generator's score is not monotonically decreasing.**
+     Rank is interleave position, by design (ADR-0023). RRF consumes rank so
+     this is invisible today, but any later code that sorts semantic
+     candidates by score — a diagnostic, an evaluation script, a future
+     ranker feature — silently reintroduces the single-dominant-interest
+     bug the interleave exists to prevent. Documented in the module and the
+     ADR; not enforced by a type.
+114. **`GeneratorStatus.FAILED` is defined and never set.** rec-spec §16
+     wants generator failures isolated, but the isolation belongs to the
+     pipeline that runs them (R8), not to a generator raising inside itself.
+     The status exists so R8 does not have to widen the contract; until then
+     an exception from a generator propagates.
+115. **Seed and query caps have never bound on real data.**
+     `max_seed_books=40`, `max_semantic_queries=12` and
+     `semantic_min_score=0.35` were chosen from the shape of the artifacts,
+     and the live reader has 18 seeds and 6 queries, so none of the three
+     was exercised. The score floor is the one most likely to be wrong: it
+     is the only tunable here that can silently *remove* results.
+
 ## 7. Next phase
 
-**Recommender Phase R6 — the candidate-generator framework and the five
-generators.** Scope and acceptance criteria are in
-`RECOMMENDER_IMPLEMENTATION_PLAN.md`; ADR-0017 governs fusion and ranking,
-ADR-0016 the semantic profiling R6 consumes.
+**Recommender Phase R7 — surface configuration, weighted RRF, the
+deterministic ranker and UX reranking.** Scope and acceptance criteria are
+in `RECOMMENDER_IMPLEMENTATION_PLAN.md`; ADR-0017 governs all four, and
+ADR-0023 defines the generator contract R7 consumes.
 
-R6 is the first phase since R2 that changes what a reader sees, and the
-first that puts any of R3-R5's artifacts on the request path. Everything it
-needs now exists and is tested in isolation:
+R7 turns five ranked lists into one ordered batch. The five exist, are
+independently tested, and have been run together against the real artifacts
+(§5o) — what does not exist yet is anything that decides how much each one
+counts.
 
-| Generator | What R6 wires up |
+**The generators are not interchangeable, and R6 made this concrete rather
+than statistical.** For one real reader, from identical evidence:
+
+| Generator | Top of its list |
 |---|---|
-| popularity | `load_popularity_artifact` — already serving |
-| source similarity | `SourceSimilarityGraph.neighbor_book_ids` (R3) |
-| ALS CF | `AlsArtifact.fold_in` + `top_candidates` (R4) |
-| item-item CF | `ItemCfNeighbors.candidates_from_seeds` (R4) |
-| semantic/content | `ContentEmbeddings.search` + `build_semantic_profile` (R5) |
+| ALS | *The Return of the King*, *The Two Towers*, *Ender's Game* |
+| semantic | Dune, Harry Potter, *Count Zero*, Star Wars — one per interest |
+| source similarity | *House Corrino*, then a large tie group |
+| item-CF | children's poetry, regency romance, obscure mysteries |
+| popularity | Calvin and Hobbes |
 
-Three things R6 should keep in view, all recorded above with evidence:
+Four things R7 should keep in view, all recorded above with evidence:
 
-- **The generators are not interchangeable.** ALS is the most accurate and
-  by far the most concentrated (coverage 0.046, Gini 0.86); item-CF covers
-  far more catalog (0.547, Gini 0.374). Fusion weights that ignore this
-  import ALS's concentration into the feed (risk #98).
-- **Loading them all costs real memory** — the content artifact alone is
-  181 MB (risk #106). R6 is where per-worker footprint stops being
-  theoretical.
-- **Every generator must respect the exclusion sets the application
-  supplies**, which each artifact's retrieval path already implements and
-  tests; application-owned eligibility stays outside the engine.
+- **Weighting item-CF by its coverage imports its noise.** Its breadth
+  (0.547 vs ALS's 0.046) is a real argument for including it, but 10.4% of
+  its edges are saturated at similarity 1.0, so the top of its list is
+  ordered by a `book_id` tiebreak (risk #111). Fixing the aggregation is
+  probably better than lowering the weight; the function belongs to R4.
+- **ALS is accurate and concentrated** (Gini 0.86 vs 0.374): weights that
+  ignore this import its concentration into the feed (risk #98).
+- **Near-duplicate works are real** — `'Dune'` and `'Dune *'` are separate
+  rows — so ADR-0017's near-duplicate reranking is load-bearing (risk #112).
+- **The latency budget is intact.** All five generators together run in
+  under 20 ms against a ~5 s provider timeout, so fusion, ranking and
+  reranking have room; the constraint that is *not* comfortable is memory,
+  at ~1.0-1.2 GB per worker for all six artifact families (risk #106).
 
-R6 has not been started. Do not begin it as part of an R5 pass.
+R7 has not been started. Do not begin it as part of an R6 pass.
 
 **The drift-item ledger stayed closed.** R4 emptied it; R5 added no new
-items — the two corrections it made (the R4 boundary test's bluntness and
-an R3 validation rule that real data disproved) were both fixed in the same
-pass rather than deferred.
+items; R6 added none — its one correction (the source-similarity tiebreak,
+found by the live run) was made in the same pass, and the two problems it
+could not fix in scope are recorded as risks #111 and #112 rather than as
+silent debt.
 
 ### The application sequence is complete
 
