@@ -93,12 +93,19 @@ def test_session_factory(test_engine: Engine) -> sessionmaker[Session]:
 
 @pytest.fixture(autouse=True)
 def _clean_all_tables(test_engine: Engine) -> None:
-    """Truncate before each test — a clean slate regardless of prior test outcomes."""
+    """Truncate before each test — a clean slate regardless of prior test outcomes.
+
+    `search_queries` (Phase R1) and `user_taste_seeds` (Phase R2) are listed
+    explicitly even though `TRUNCATE ... CASCADE` on `users` would reach
+    them through their FKs anyway. Relying on that implicit reach means the
+    day a FK changes, tests start leaking rows between cases and failing in
+    ways that look like application bugs.
+    """
     with test_engine.begin() as conn:
         conn.execute(
             text(
                 "TRUNCATE TABLE auth_sessions, shelf_books, shelves, user_book_states, "
-                "interaction_events, "
+                "user_taste_seeds, interaction_events, search_queries, "
                 "recommendation_impressions, recommendation_results, "
                 "recommendation_requests, model_versions, "
                 "users, "

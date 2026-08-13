@@ -15,6 +15,10 @@ DEFAULT_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
 def _user_context(user_id: UUID = DEFAULT_USER_ID) -> UserContext:
+    """An empty-but-valid context. ``profile_version`` is required (see
+    ``UserContext``) — the literal here stands in for what the application's
+    context builder computes; these engine/provider tests only care that a
+    context is well-formed, never what its fingerprint is."""
     return UserContext(
         user_id=user_id,
         ratings=(),
@@ -23,6 +27,7 @@ def _user_context(user_id: UUID = DEFAULT_USER_ID) -> UserContext:
         not_interested_book_ids=frozenset(),
         recent_interactions=(),
         shelf_summaries=(),
+        profile_version="test-profile-v1",
     )
 
 

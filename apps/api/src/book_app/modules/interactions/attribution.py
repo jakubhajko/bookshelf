@@ -49,6 +49,15 @@ class InteractionSurface(StrEnum):
     RATED = "rated"
 
 
+class TasteSeedSource(StrEnum):
+    """Where a taste seed was selected (ADR-0019). Closed at the API edge
+    for the same reason as :class:`InteractionSurface` — this is training
+    evidence, and an unvalidated free-text origin is a row nobody can
+    interpret later."""
+
+    ONBOARDING = "onboarding"
+
+
 class InteractionAttribution(BaseModel):
     """Optional provenance attached to an interaction write.
 

@@ -61,6 +61,44 @@ class UserBookState(Base):
     )
 
 
+class UserTasteSeed(Base):
+    """An explicit taste seed (rec-spec §6, ADR-0019).
+
+    Its own table rather than a flag on ``user_book_states``, deliberately.
+    That table encodes the Neutral/Rated/Not-Interested trichotomy with a
+    database-level mutual-exclusion constraint; a seed is orthogonal to all
+    three (a reader can seed a book and later rate it, or seed one they've
+    marked Not Interested by mistake), so folding it in would mean
+    loosening a constraint that protects a real domain rule.
+
+    Storing seeds as 5-star ratings or as an auto-created shelf — the two
+    obvious shortcuts — would corrupt what a rating and a shelf *mean* in
+    this product. A rating asserts "I read this"; a shelf is something the
+    reader built. A seed asserts neither. ADR-0019 has the full argument.
+
+    Composite PK: a book is seeded or it isn't, so re-selecting is
+    naturally idempotent. The PK's leading ``user_id`` column also serves
+    "list this user's seeds", so no separate index is needed.
+    """
+
+    __tablename__ = "user_taste_seeds"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    book_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("books.id", ondelete="CASCADE"), primary_key=True
+    )
+    #: Where the selection came from. Plain text, like ``event_type`` and
+    #: ``surface``, and validated at the API edge against ``TasteSeedSource``
+    #: — `onboarding` is the only value today, but seeds are a general
+    #: mechanism and a later surface shouldn't need a migration.
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    selected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class InteractionEvent(Base):
     """Append-only (spec §8.9) — nothing in this module ever updates or
     deletes a row here, only inserts."""

@@ -16,7 +16,11 @@ from sqlalchemy.orm import Session
 
 from book_app.modules.books.models import Book, BookGenre, Genre
 from book_app.modules.interactions.attribution import NO_ATTRIBUTION, InteractionAttribution
-from book_app.modules.interactions.models import InteractionEvent, UserBookState
+from book_app.modules.interactions.models import (
+    InteractionEvent,
+    UserBookState,
+    UserTasteSeed,
+)
 from book_app.shared.text import normalize_for_uniqueness
 
 
@@ -214,6 +218,82 @@ def cursor_value_for_row(sort: RatingsSort, row: RatedBookRow) -> Any:
     return row.primary_author_name or "~"
 
 
+# --- Taste seeds (rec-spec §6, ADR-0019) ------------------------------------
+
+
+def get_taste_seeds(session: Session, *, user_id: UUID) -> list[UserTasteSeed]:
+    stmt = (
+        select(UserTasteSeed)
+        .where(UserTasteSeed.user_id == user_id)
+        .order_by(UserTasteSeed.selected_at.desc(), UserTasteSeed.book_id)
+    )
+    return list(session.execute(stmt).scalars())
+
+
+def get_taste_seed_book_ids(session: Session, *, user_id: UUID) -> set[int]:
+    stmt = select(UserTasteSeed.book_id).where(UserTasteSeed.user_id == user_id)
+    return set(session.execute(stmt).scalars())
+
+
+@dataclass(frozen=True)
+class TasteSeedBookRow:
+    book_id: int
+    work_id: str
+    title: str
+    primary_author_name: str | None
+    cover_object_key: str | None
+    source: str
+    selected_at: datetime
+
+
+def list_taste_seed_books(session: Session, *, user_id: UUID) -> list[TasteSeedBookRow]:
+    """Seeds joined to enough catalog data to render them as cards, so the
+    onboarding UI can show what's currently selected without a second
+    round trip per book."""
+    stmt = (
+        select(
+            Book.id,
+            Book.work_id,
+            Book.title,
+            Book.primary_author_name,
+            Book.cover_object_key,
+            UserTasteSeed.source,
+            UserTasteSeed.selected_at,
+        )
+        .join(Book, Book.id == UserTasteSeed.book_id)
+        .where(UserTasteSeed.user_id == user_id)
+        .order_by(UserTasteSeed.selected_at.desc(), Book.id)
+    )
+    return [
+        TasteSeedBookRow(
+            book_id=row.id,
+            work_id=row.work_id,
+            title=row.title,
+            primary_author_name=row.primary_author_name,
+            cover_object_key=row.cover_object_key,
+            source=row.source,
+            selected_at=row.selected_at,
+        )
+        for row in session.execute(stmt)
+    ]
+
+
+def add_taste_seed(session: Session, *, user_id: UUID, book_id: int, source: str) -> UserTasteSeed:
+    seed = UserTasteSeed(user_id=user_id, book_id=book_id, source=source)
+    session.add(seed)
+    session.flush()
+    return seed
+
+
+def remove_taste_seed(session: Session, *, user_id: UUID, book_id: int) -> bool:
+    seed = session.get(UserTasteSeed, (user_id, book_id))
+    if seed is None:
+        return False
+    session.delete(seed)
+    session.flush()
+    return True
+
+
 # --- Read-side queries (Phase 5: recommendation context/eligibility) --------
 
 # Conservative bounds on what goes into a UserContext snapshot (spec §10.5:
@@ -221,8 +301,41 @@ def cursor_value_for_row(sort: RatingsSort, row: RatedBookRow) -> Any:
 # long-time user's full rating history has no upper bound otherwise and
 # nothing consumes more than this yet; raise later if a real engine needs
 # more signal).
+#
+# Recommender Phase R2 adds bounds for the two new unbounded components.
+# Each list is ordered most-recent-first *before* truncating, so what
+# survives is the most recent evidence rather than an arbitrary slice —
+# see `context_builder` for the documented truncation order.
 MAX_CONTEXT_RATINGS = 500
 MAX_CONTEXT_RECENT_INTERACTIONS = 50
+#: Shelf *memberships*, not distinct books — a book on three shelves uses
+#: three. Generous because per-shelf semantic profiling (rec-spec §12.1)
+#: wants whole shelves, and a heavy user with a few large shelves is the
+#: normal case rather than the pathological one.
+MAX_CONTEXT_SAVED_BOOKS = 1000
+#: Onboarding asks for roughly 3-10 (rec-spec §6). The cap only exists so
+#: a scripted client can't make the context unbounded.
+MAX_CONTEXT_TASTE_SEEDS = 100
+
+
+@dataclass(frozen=True)
+class TasteSeedContextRow:
+    book_id: int
+    source: str
+    selected_at: datetime
+
+
+def get_taste_seed_context_rows(session: Session, *, user_id: UUID) -> list[TasteSeedContextRow]:
+    stmt = (
+        select(UserTasteSeed.book_id, UserTasteSeed.source, UserTasteSeed.selected_at)
+        .where(UserTasteSeed.user_id == user_id)
+        .order_by(UserTasteSeed.selected_at.desc(), UserTasteSeed.book_id)
+        .limit(MAX_CONTEXT_TASTE_SEEDS)
+    )
+    return [
+        TasteSeedContextRow(book_id=row.book_id, source=row.source, selected_at=row.selected_at)
+        for row in session.execute(stmt)
+    ]
 
 
 def get_rated_book_ids(session: Session, *, user_id: UUID) -> set[int]:
@@ -263,19 +376,62 @@ def get_rating_context_rows(session: Session, *, user_id: UUID) -> list[RatingCo
 
 @dataclass(frozen=True)
 class RecentEventRow:
+    """Recommender Phase R2 widened this beyond type/book/time.
+
+    Phase R1 started writing six attribution columns; this query then threw
+    every one of them away on the way into the recommendation context, so
+    the evidence existed in the database and was invisible to the engine.
+    A session-aware generator needs to distinguish an open that came from a
+    recommendation from one that came from a search — that distinction is
+    exactly these columns.
+    """
+
     event_type: str
     book_id: int | None
     occurred_at: datetime
+    shelf_id: UUID | None
+    surface: str | None
+    session_id: UUID | None
+    recommendation_request_id: UUID | None
+    search_query_id: UUID | None
+    source_book_id: int | None
+    rank_position: int | None
 
 
 def get_recent_events(session: Session, *, user_id: UUID) -> list[RecentEventRow]:
     stmt = (
-        select(InteractionEvent.event_type, InteractionEvent.book_id, InteractionEvent.occurred_at)
+        select(
+            InteractionEvent.event_type,
+            InteractionEvent.book_id,
+            InteractionEvent.occurred_at,
+            InteractionEvent.shelf_id,
+            InteractionEvent.surface,
+            InteractionEvent.session_id,
+            InteractionEvent.recommendation_request_id,
+            InteractionEvent.search_query_id,
+            InteractionEvent.source_book_id,
+            InteractionEvent.rank_position,
+        )
         .where(InteractionEvent.user_id == user_id)
-        .order_by(InteractionEvent.occurred_at.desc())
+        # id as tiebreaker: `occurred_at` defaults to now() and several
+        # events written in one transaction can share a timestamp exactly,
+        # which would make the "most recent 50" an arbitrary pick among
+        # ties — and therefore make the context non-deterministic.
+        .order_by(InteractionEvent.occurred_at.desc(), InteractionEvent.id.desc())
         .limit(MAX_CONTEXT_RECENT_INTERACTIONS)
     )
     return [
-        RecentEventRow(event_type=row.event_type, book_id=row.book_id, occurred_at=row.occurred_at)
+        RecentEventRow(
+            event_type=row.event_type,
+            book_id=row.book_id,
+            occurred_at=row.occurred_at,
+            shelf_id=row.shelf_id,
+            surface=row.surface,
+            session_id=row.session_id,
+            recommendation_request_id=row.recommendation_request_id,
+            search_query_id=row.search_query_id,
+            source_book_id=row.source_book_id,
+            rank_position=row.rank_position,
+        )
         for row in session.execute(stmt)
     ]

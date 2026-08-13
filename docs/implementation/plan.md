@@ -981,8 +981,8 @@ repository valid, tested and resumable.
 | Phase | Scope | Status |
 |---|---|---|
 | R0 | Reconcile, baseline, lock architectural decisions | done |
-| R1 | Interaction instrumentation, attribution, impression correctness | **done, this pass** |
-| R2 | Rich user context, profile version, cold-start taste seeds | not started |
+| R1 | Interaction instrumentation, attribution, impression correctness | done |
+| R2 | Rich user context, profile version, cold-start taste seeds | **done, this pass** |
 | R3 | Artifact substrate, data validation, source-similarity export | not started |
 | R4 | CF artifacts: ALS + item-item | not started |
 | R5 | Content embeddings, multi-interest profiling, human inspection | not started |
@@ -1335,12 +1335,152 @@ Tests:
 - `components/ShelfSelectorPopover.test.tsx` — two assertions updated for
   the new `syncBookShelves` arity.
 
-### Phases R2-R9 — not started
+### Phase R2 — Rich user context, profile version and cold-start taste seeds — **done, this pass**
+
+Goal: make the request context preserve the *structure* of a reader's
+preferences, and give derived state a sound cache key. No recommendation
+behavior changed — the engine still receives the same candidates; it now
+receives them alongside evidence it previously never saw.
+
+#### R2 checklist
+
+- [x] Per-shelf saved-book snapshots (`book_id`, `shelf_id`, `added_at`),
+  with the flat `saved_book_ids` kept for eligibility.
+- [x] Recent events preserve the attribution R1 records instead of
+  dropping it at the context boundary.
+- [x] Onboarding taste seeds in `UserContext`.
+- [x] Deterministic `profile_version` over durable evidence; passive
+  impressions and opens leave it unchanged.
+- [x] `user_taste_seeds` state + raw add/remove events; seeds are never
+  ratings or shelf memberships.
+- [x] `GET` / `PUT /me/taste-seeds` endpoints; OpenAPI client regenerated.
+- [x] Documented bounds and truncation order for every context component.
+- [x] Tests landed with the phase; full gates green; live smoke test.
+
+#### The distinction R2 exists for
+
+From the live smoke test, one book saved to two shelves:
+
+```text
+saved_book_ids : [58203]                      <- collapsed, eligibility
+saved_books    : [(58203, shelf 7440f0f8, 2026-08-13T13:07:10),
+                  (58203, shelf c00776c3, 2026-08-13T13:07:10)]
+```
+
+Both are correct for their own question. Eligibility asks "is this saved
+anywhere?"; shelf-scoped semantic profiling (rec-spec §12.1) asks "what is
+on *this* shelf, and how recently?". Before R2 only the first was
+answerable.
+
+#### `profile_version` semantics, verified live
+
+| Action | Version |
+|---|---|
+| baseline | `v1:62eeace4a5cff481` |
+| home feed delivered (impressions written) | unchanged |
+| `book_opened` | unchanged |
+| rating set | **changed** → `v1:72e08c2366d3bfe6` |
+
+Included as durable evidence: rating values, shelf memberships with
+`added_at`, Not Interested, taste seeds with `selected_at`. Excluded:
+impressions, opens, searches.
+
+Rating *values* are included but rating *timestamps* are not —
+`user_book_states.updated_at` fires on any change to the row, including a
+Not-Interested transition, so folding it in would churn the version for
+reasons unrelated to the rating. Shelf `added_at` and seed `selected_at`
+*are* included, because unlike a rating timestamp they are evidence
+generators weight (save recency). The consequence is deliberate: removing
+a book from a shelf and re-adding it changes the version even though the
+membership set is identical, because the recency evidence genuinely
+changed.
+
+The version is computed over the **truncated** context components, not the
+full database state — it fingerprints what the engine will actually see,
+which is what makes it sound as a cache key for derived state such as an
+ALS fold-in factor (rec-spec §9.2).
+
+#### Context bounds and truncation order
+
+Every unbounded list is ordered most-recent-first and *then* capped, so a
+cap drops the oldest evidence rather than an arbitrary slice. Ties are
+broken by a stable secondary key (`id` for events, `book_id`/`shelf_id` for
+memberships) — without that, rows written in one transaction share a
+timestamp exactly and the "most recent N" would be a non-deterministic
+pick, which would in turn make `profile_version` non-deterministic.
+
+| Component | Cap | Order |
+|---|---|---|
+| `ratings` | 500 | most recently rated |
+| `recent_interactions` | 50 | most recent, `id` tiebreak |
+| `saved_books` | 1000 memberships | most recently added |
+| `taste_seeds` | 100 | most recently selected |
+
+Sets are never truncated. `saved_book_ids` and `not_interested_book_ids`
+are eligibility inputs, and silently dropping ids from those would let
+excluded books back into a feed — a correctness bug, not a performance
+trade-off.
+
+#### Design decisions worth recording
+
+- **`profile_version` is required, not optional.** It was declared
+  `str | None` since Phase 5 with no producer. A cache key that might be
+  absent is not a cache key, so R2 made it non-optional and updated the two
+  construction sites.
+- **Taste seeds are their own table** (ADR-0019), not a flag on
+  `user_book_states` — that table's mutual-exclusion check constraint
+  protects a real domain rule, and a seed is orthogonal to all three of its
+  states. An integration test asserts a seeded book has no rating, no shelf
+  membership, no Not-Interested state, and does not appear in
+  `/me/ratings`.
+- **Seeding is full-replace**, mirroring `sync_book_shelves`: onboarding is
+  a multi-select confirmed once, so the complete set is what the client
+  knows, and it makes retries idempotent. Every book id is validated before
+  anything is written, so one bad id cannot leave a half-applied selection.
+- **No frontend work.** rec-spec sequences the onboarding UI into R8; R2's
+  frontend obligation is the regenerated client types only. A thin
+  `api/tasteSeeds.ts` wrapper was deliberately *not* added — it would be an
+  unused abstraction until the UI that needs it exists.
+- **`_timestamp` normalizes to UTC.** Caught while writing it: rendering
+  whatever offset psycopg returned would fingerprint the same instant
+  differently across processes with different session time zones, quietly
+  defeating the cache. There is a test for it.
+
+#### Changed files (R2)
+
+- `packages/recommender/.../contracts/context.py` — `SavedBookSnapshot`,
+  `TasteSeedSnapshot`, seven new optional fields on
+  `RecentInteractionSnapshot`, `saved_books`/`taste_seeds` on
+  `UserContext`, `profile_version` now required.
+- `packages/recommender/tests/conftest.py`,
+  `apps/api/tests/test_recommendation_eligibility.py` — the two
+  `UserContext` construction sites.
+- `modules/interactions/models.py` — **new** `UserTasteSeed`.
+- `modules/interactions/attribution.py` — `TasteSeedSource`.
+- `modules/interactions/event_types.py` — `TASTE_SEED_ADDED/REMOVED`.
+- `modules/interactions/repository.py` — seed CRUD + context rows;
+  `RecentEventRow` widened to carry attribution; new `MAX_CONTEXT_*` caps.
+- `modules/interactions/service.py` — `sync_taste_seeds`,
+  `list_taste_seeds`.
+- `modules/interactions/api.py`, `schemas.py` — `GET`/`PUT
+  /me/taste-seeds`.
+- `modules/shelves/repository.py` — **new** `get_saved_book_rows`.
+- `modules/recommendations/profile_version.py` — **new**, pure.
+- `modules/recommendations/context_builder.py` — assembles all of it.
+- `migrations/versions/beb1c8746ac1_user_taste_seeds.py` — **new**, the
+  only schema change.
+- `tests/integration/conftest.py` — truncate `user_taste_seeds` and
+  `search_queries` explicitly rather than via implicit CASCADE.
+- `apps/api/tests/test_profile_version.py` (16) and
+  `tests/integration/test_recommendation_context.py` (21) — **new**.
+- `apps/web/src/api/generated/schema.d.ts`, `openapi.json` — regenerated.
+
+### Phases R3-R9 — not started
 
 Scope, tasks and per-phase acceptance criteria live in
 `RECOMMENDER_IMPLEMENTATION_PLAN.md` and are not duplicated here. Each phase
 appends its own record to this section as it lands, in the same shape as R0
-and R1 above: checklist, drift found, decisions/ADRs, changed files,
+and R1/R2 above: checklist, drift found, decisions/ADRs, changed files,
 commands run with real results, and unresolved risks appended to §6.
 
 Standing constraints for every recommender phase (from `CLAUDE.md` and
@@ -2005,6 +2145,67 @@ Afterwards, the events the *real browser* produced were inspected: all 8
 `book_opened` rows carry a surface and session, 7 of them a recommendation
 request id, and 7 `shelf_book_added` rows carry full attribution —
 confirming the chain works end to end in a browser, not only in jsdom.
+
+## 5k. Recommender Phase R2 validation commands and results
+
+```bash
+# Migration: the only schema change this phase, hand-edited after
+# autogenerate to strip the same three phantom index drops.
+cd apps/api && uv run alembic upgrade head
+                 uv run alembic downgrade -1
+                 uv run alembic upgrade head
+# Confirmed all 3 hand-written search indexes survived: count = 3.
+
+make generate-api-client        # +2 paths, +4 schema types (TasteSeed*)
+
+make test
+# apps/api        143 passed   (was 127 — +16 profile-version unit tests)
+# packages/recommender  38 passed
+# apps/web         93 passed   (unchanged — no frontend work this phase)
+make lint                       # clean, all four targets
+make typecheck                  # clean: 119 + 26 source files, apps/web
+uv run --project apps/api pytest tests/integration -q
+#                161 passed    (was 140 — +21 context/taste-seed tests)
+```
+
+**Live smoke test** against the real dev database (92,524 books), seeding
+two genuinely-real books (Dune, Hyperion) and saving one to two shelves:
+
+```text
+PUT /me/taste-seeds  [Dune, Hyperion]  -> 200, both returned with covers
+GET /me/ratings                        -> 0 items   (seeds are not ratings)
+PUT /books/{dune}/shelves [A, B]       -> 200
+```
+
+Then the built context was inspected directly through `context_builder` —
+the same code path the recommendation service uses:
+
+```text
+saved_book_ids : [58203]                       collapsed, eligibility
+saved_books    : [(58203, shelf 7440f0f8, ...),
+                  (58203, shelf c00776c3, ...)]  per-shelf, with added_at
+taste_seeds    : [(14305, onboarding), (58203, onboarding)]
+ratings        : ()                            seeds imply no rating
+recent events  : shelf_book_added/search x2, taste_seed_added x2
+stable across sessions: True
+```
+
+And `profile_version` invalidation, exercised through real HTTP calls:
+
+| Action | Version |
+|---|---|
+| baseline | `v1:62eeace4a5cff481` |
+| `GET /recommendations/home` (impressions written) | unchanged |
+| `POST /books/{id}/opened` | unchanged |
+| `PUT /books/{id}/rating` | **changed** → `v1:72e08c2366d3bfe6` |
+
+That table is the phase's central claim, verified end to end rather than
+only in unit tests. Server logs clean throughout: `{200: 9, 201: 3,
+204: 1}`, no error-level entries, no tracebacks.
+
+E2E was **not** re-run this phase: R2 changes no route the critical flow
+exercises and no frontend code at all (the onboarding UI is R8 scope), so
+it has nothing new to cover. Last verified green in §5j.
 
 ## 6. Risks and assumptions
 
@@ -2892,19 +3093,61 @@ conservative, reversible default and document it."
     Noted explicitly because it's the obvious failure mode for this kind
     of instrumentation and the next reader will wonder.
 
+### Recommender Phase R2
+
+88. **`profile_version` becoming required is a breaking contract change for
+    any out-of-tree `UserContext` producer.** There are none today — both
+    construction sites are in this repository and both were updated — but a
+    remote provider built against the old optional field would now fail
+    validation. Noted because ADR-0006 deliberately keeps
+    `RemoteProvider` as a live seam.
+89. **The version churns on shelf re-saves.** Including `added_at` means
+    remove-then-re-add produces a new version despite an identical
+    membership set. Correct (the recency evidence changed) but it means a
+    reader who reorganizes shelves invalidates their cached fold-in factor
+    repeatedly. If that proves expensive once ALS exists, the fix is to
+    bucket `added_at` to a coarser granularity — a change to
+    `PROFILE_VERSION_ALGORITHM`, not to the schema.
+90. **Context caps are unvalidated against real heavy users.**
+    `MAX_CONTEXT_SAVED_BOOKS = 1000` and the other limits are reasoned
+    guesses, not measurements; no account in this environment has enough
+    shelf memberships to exercise truncation. R9's performance profiling is
+    where these get real numbers, and `saved_books` is the one most likely
+    to need raising, since per-shelf semantic profiling wants whole shelves.
+91. **A taste seed can point at a book the reader later rates or rejects.**
+    Nothing prevents it, deliberately — the states are orthogonal
+    (ADR-0019). But it means generators must decide how to weigh a book
+    that is both a seed and a 3/10 rating; rec-spec §7.1's signal policy
+    covers the combination, and R6's generators are where it has to be
+    implemented rather than assumed.
+92. **Seeds have no dedicated eligibility rule.** A seeded book is not
+    excluded from Home by spec §5.5, so a reader can be recommended a book
+    they explicitly seeded. That may well be wrong from a product
+    standpoint, but changing eligibility is a product decision outside R2's
+    scope and would alter shipped behavior — flagged here rather than
+    silently decided.
+
 ## 7. Next phase
 
-**Recommender Phase R2 — rich user context, deterministic profile version
-and cold-start taste seeds.** Scope and acceptance criteria are in
-`RECOMMENDER_IMPLEMENTATION_PLAN.md`; the live gap it consumes is recorded
-at §3R "Drift and gaps found" item 9 (`UserContext` has no per-shelf
-membership, no `added_at`, no taste seeds, and a `profile_version` field
-that no producer sets). ADR-0019 governs how taste seeds are stored.
+**Recommender Phase R3 — artifact substrate, data validation and
+source-similarity export.** Scope and acceptance criteria are in
+`RECOMMENDER_IMPLEMENTATION_PLAN.md`; the live gaps it consumes are
+recorded at §3R "Drift and gaps found" items 10 (popularity artifact
+parsing still inline in `wiring.py`), 11 (269,276 source-similarity edges
+are PostgreSQL-only, unusable without a DB read during inference), 12 (no
+numerical/ML dependencies in the workspace at all) and 15
+(`ArtifactManifest.item_mapping` unmeasured at multi-family scale).
+ADR-0014 governs the artifact runtime boundary.
 
-R2 has not been started. Do not begin it as part of an R1 pass.
+R3 is the first phase that adds heavy dependencies to the uv workspace and
+the first to be blocked by a genuine unknown — whether the transformer
+stack resolves cleanly on this platform (risk #81) — though the encoder
+itself is R5's problem, not R3's.
 
-R1 closed drift items 4-8 and 14. Item 9 is R2's; items 10-13 and 15 belong
-to R3-R5.
+R3 has not been started. Do not begin it as part of an R2 pass.
+
+Drift-item ledger: R1 closed items 4-8 and 14; R2 closed item 9. Items
+10-13 and 15 remain, spread across R3-R5.
 
 ### The application sequence is complete
 

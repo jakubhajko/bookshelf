@@ -252,6 +252,39 @@ def get_all_shelved_book_ids(session: Session, *, user_id: UUID) -> set[int]:
     return set(session.execute(stmt).scalars())
 
 
+@dataclass(frozen=True)
+class SavedBookRow:
+    book_id: int
+    shelf_id: UUID
+    added_at: datetime
+
+
+def get_saved_book_rows(session: Session, *, user_id: UUID, limit: int) -> list[SavedBookRow]:
+    """Every shelf membership, un-collapsed (rec-spec §5).
+
+    :func:`get_all_shelved_book_ids` flattens the same data to a set for
+    eligibility; this keeps one row per `(book, shelf)` pair with its
+    `added_at`, which is what shelf-scoped semantic profiling and
+    recency-weighted seeding need. A book on three shelves appears three
+    times here and once there — both are correct for their purpose.
+
+    Most-recent-first so the `limit` truncates the oldest memberships
+    rather than an arbitrary slice; `book_id` breaks timestamp ties so the
+    result is deterministic (bulk saves share an `added_at`).
+    """
+    stmt = (
+        select(ShelfBook.book_id, ShelfBook.shelf_id, ShelfBook.added_at)
+        .join(Shelf, Shelf.id == ShelfBook.shelf_id)
+        .where(Shelf.user_id == user_id)
+        .order_by(ShelfBook.added_at.desc(), ShelfBook.book_id, ShelfBook.shelf_id)
+        .limit(limit)
+    )
+    return [
+        SavedBookRow(book_id=row.book_id, shelf_id=row.shelf_id, added_at=row.added_at)
+        for row in session.execute(stmt)
+    ]
+
+
 def get_book_ids_in_shelf(session: Session, *, shelf_id: UUID) -> set[int]:
     """Books already in *this* shelf — spec §5.5: shelf discovery excludes
     "books already in that shelf" (books on *other* shelves remain eligible,

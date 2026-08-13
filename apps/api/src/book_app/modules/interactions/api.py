@@ -9,11 +9,16 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from book_app.core.dependencies import get_db
-from book_app.modules.auth.dependencies import get_current_user
+from book_app.modules.auth.dependencies import get_current_user, require_csrf
 from book_app.modules.interactions import service as interactions_service
 from book_app.modules.interactions.rating_scale import internal_to_public
-from book_app.modules.interactions.repository import RatingsSort
-from book_app.modules.interactions.schemas import RatedBookItem
+from book_app.modules.interactions.repository import RatingsSort, TasteSeedBookRow
+from book_app.modules.interactions.schemas import (
+    RatedBookItem,
+    TasteSeedItem,
+    TasteSeedsResponse,
+    TasteSeedsSyncRequest,
+)
 from book_app.modules.users.models import User
 from book_app.shared.pagination import Page
 
@@ -60,3 +65,48 @@ def list_ratings(
         for r in rows
     ]
     return Page[RatedBookItem](items=items, next_cursor=next_cursor)
+
+
+def _to_taste_seed_item(row: TasteSeedBookRow) -> TasteSeedItem:
+    return TasteSeedItem(
+        book_id=row.book_id,
+        work_id=row.work_id,
+        title=row.title,
+        primary_author_name=row.primary_author_name,
+        cover_object_key=row.cover_object_key,
+        source=row.source,
+        selected_at=row.selected_at,
+    )
+
+
+@router.get("/taste-seeds", response_model=TasteSeedsResponse)
+def list_taste_seeds(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> TasteSeedsResponse:
+    """This user's current taste seeds (rec-spec §6). Not paginated —
+    the set is bounded at 100 by the sync endpoint and realistically holds
+    single digits."""
+    rows = interactions_service.list_taste_seeds(db, user_id=current_user.id)
+    return TasteSeedsResponse(items=[_to_taste_seed_item(row) for row in rows])
+
+
+@router.put("/taste-seeds", response_model=TasteSeedsResponse)
+def sync_taste_seeds(
+    body: TasteSeedsSyncRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _csrf: None = Depends(require_csrf),
+) -> TasteSeedsResponse:
+    """Replace the seed set (rec-spec §6, ADR-0019).
+
+    Sending `[]` clears every seed, which is how a reader un-does
+    onboarding. Skipping onboarding entirely just never calls this — no
+    seeds is a valid, supported state that falls back to diversified
+    popularity.
+    """
+    interactions_service.sync_taste_seeds(
+        db, user_id=current_user.id, book_ids=body.book_ids, source=body.source
+    )
+    rows = interactions_service.list_taste_seeds(db, user_id=current_user.id)
+    return TasteSeedsResponse(items=[_to_taste_seed_item(row) for row in rows])

@@ -30,6 +30,10 @@ def _user_context(
         not_interested_book_ids=not_interested_book_ids,
         recent_interactions=(),
         shelf_summaries=(),
+        # Required since recommender Phase R2. Eligibility is a pure
+        # function of rated/Not-Interested/saved ids and never reads this,
+        # so a literal keeps these tests focused on the rules themselves.
+        profile_version="test-profile-v1",
     )
 
 

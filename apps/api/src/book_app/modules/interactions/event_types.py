@@ -34,3 +34,9 @@ class EventType(StrEnum):
     #: can be traced back to the search that produced it. `book_id` is null
     #: here — the first use of that column's nullability.
     SEARCH_SUBMITTED = "search_submitted"
+    #: Explicit taste seeds (rec-spec §6, ADR-0019). The `user_taste_seeds`
+    #: table answers "what are this reader's seeds now"; these answer "how
+    #: did that change over time" — the same state-plus-events split every
+    #: other preference transition in this module already uses.
+    TASTE_SEED_ADDED = "taste_seed_added"
+    TASTE_SEED_REMOVED = "taste_seed_removed"

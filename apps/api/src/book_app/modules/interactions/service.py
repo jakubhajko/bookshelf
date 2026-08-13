@@ -13,11 +13,19 @@ from sqlalchemy.orm import Session
 from book_app.modules.books import repository as books_repository
 from book_app.modules.books.exceptions import BookNotFoundError
 from book_app.modules.interactions import repository as interactions_repository
-from book_app.modules.interactions.attribution import NO_ATTRIBUTION, InteractionAttribution
+from book_app.modules.interactions.attribution import (
+    NO_ATTRIBUTION,
+    InteractionAttribution,
+    TasteSeedSource,
+)
 from book_app.modules.interactions.event_types import EventType
 from book_app.modules.interactions.models import UserBookState
 from book_app.modules.interactions.rating_scale import public_to_internal
-from book_app.modules.interactions.repository import RatedBookRow, RatingsSort
+from book_app.modules.interactions.repository import (
+    RatedBookRow,
+    RatingsSort,
+    TasteSeedBookRow,
+)
 from book_app.shared.pagination import decode_cursor, encode_cursor
 
 DEFAULT_PAGE_SIZE = 30
@@ -187,6 +195,62 @@ def record_book_opened(
         attribution=attribution,
     )
     session.commit()
+
+
+def sync_taste_seeds(
+    session: Session,
+    *,
+    user_id: UUID,
+    book_ids: list[int],
+    source: TasteSeedSource = TasteSeedSource.ONBOARDING,
+) -> list[int]:
+    """Atomically replace this user's taste seeds (rec-spec §6, ADR-0019).
+
+    Full-replace rather than add/remove deltas, mirroring
+    ``shelves.service.sync_book_shelves``: onboarding is a multi-select the
+    reader confirms once, so "here is the complete set" is what the client
+    actually knows, and it makes the operation idempotent under retries.
+
+    Crucially this touches **no** rating, Not-Interested or shelf state. A
+    seed says "this appeals to me", not "I have read this" (a rating) and
+    not "I have curated this" (a shelf). Writing it as either would corrupt
+    what those mean — ADR-0019 has the argument, and a test asserts it.
+
+    Every requested book is validated before anything is written, so a bad
+    id can't leave a half-applied set behind.
+    """
+    requested = set(book_ids)
+    for book_id in sorted(requested):
+        _require_book(session, book_id)
+
+    current = interactions_repository.get_taste_seed_book_ids(session, user_id=user_id)
+
+    for book_id in sorted(requested - current):
+        interactions_repository.add_taste_seed(
+            session, user_id=user_id, book_id=book_id, source=source
+        )
+        interactions_repository.append_event(
+            session,
+            user_id=user_id,
+            book_id=book_id,
+            event_type=EventType.TASTE_SEED_ADDED,
+            payload={"source": str(source)},
+        )
+    for book_id in sorted(current - requested):
+        interactions_repository.remove_taste_seed(session, user_id=user_id, book_id=book_id)
+        interactions_repository.append_event(
+            session,
+            user_id=user_id,
+            book_id=book_id,
+            event_type=EventType.TASTE_SEED_REMOVED,
+        )
+
+    session.commit()
+    return sorted(requested)
+
+
+def list_taste_seeds(session: Session, *, user_id: UUID) -> list[TasteSeedBookRow]:
+    return interactions_repository.list_taste_seed_books(session, user_id=user_id)
 
 
 def list_ratings(

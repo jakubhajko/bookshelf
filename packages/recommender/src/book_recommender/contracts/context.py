@@ -32,29 +32,105 @@ class ShelfSummarySnapshot(BaseModel):
     book_count: int
 
 
+class SavedBookSnapshot(BaseModel):
+    """One shelf membership (rec-spec §5).
+
+    A book on three shelves produces three of these. Collapsing them — as
+    the global ``saved_book_ids`` set necessarily does — throws away the
+    two things shelf-aware generators need: *which* shelf expressed the
+    interest, and *when*. Both `saved_book_ids` and this exist because they
+    answer different questions: eligibility asks "is this saved anywhere?",
+    semantic shelf profiling asks "what is on this particular shelf, and
+    how recently?"
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    book_id: int
+    shelf_id: UUID
+    added_at: datetime
+
+
+class TasteSeedSnapshot(BaseModel):
+    """An explicit taste seed (rec-spec §6, ADR-0019).
+
+    Not a rating and not a shelf save — a book the reader said appeals to
+    them, typically during onboarding. Generators weight it as strong
+    positive evidence, but it never implies the reader has *read* the book,
+    which is what a rating means in this product.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    book_id: int
+    source: str
+    selected_at: datetime
+
+
 class RecentInteractionSnapshot(BaseModel):
+    """A recent raw event, with the provenance recommender Phase R1 started
+    recording (rec-spec §4.3).
+
+    Previously this carried only event type, book and time. The attribution
+    fields were being written to `interaction_events` and then dropped on
+    the way into the context — so a future session-aware generator could
+    not tell an open that came from a recommendation from one that came
+    from a search, which is most of what makes session evidence useful.
+    Everything beyond the first three fields is optional, because
+    attribution is optional (ADR-0015).
+    """
+
     model_config = ConfigDict(frozen=True)
 
     event_type: str
     book_id: int | None
     occurred_at: datetime
+    shelf_id: UUID | None = None
+    surface: str | None = None
+    session_id: UUID | None = None
+    recommendation_request_id: UUID | None = None
+    search_query_id: UUID | None = None
+    source_book_id: int | None = None
+    rank_position: int | None = None
 
 
 class UserContext(BaseModel):
-    """Spec §10.5's exact field list. ``profile_version`` is an optional
-    opaque tag a future derived-profile pipeline can set; no producer sets
-    it yet."""
+    """Spec §10.5's field list, extended by recommender Phase R2 (rec-spec
+    §5) with per-shelf membership, taste seeds and a real
+    ``profile_version``.
+
+    Bounded on every unbounded component — see the application's
+    ``context_builder`` for the limits and the order in which each list is
+    truncated. An unbounded context is a latency and memory problem that
+    only appears for the heaviest users, which is the worst time to find
+    it.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     user_id: UUID
     ratings: tuple[RatingSnapshot, ...]
+    #: Every book on any shelf, flattened — kept for eligibility (spec
+    #: §5.5), which only ever asks "saved anywhere?". Not redundant with
+    #: ``saved_books``; see :class:`SavedBookSnapshot`.
     saved_book_ids: frozenset[int]
+    saved_books: tuple[SavedBookSnapshot, ...] = ()
     shelf_ids: tuple[UUID, ...]
     not_interested_book_ids: frozenset[int]
     recent_interactions: tuple[RecentInteractionSnapshot, ...]
     shelf_summaries: tuple[ShelfSummarySnapshot, ...]
-    profile_version: str | None = None
+    taste_seeds: tuple[TasteSeedSnapshot, ...] = ()
+    #: Deterministic fingerprint of the *durable* preference evidence in
+    #: this context (rec-spec §5). Equal versions mean equal long-term
+    #: profile, which is what makes it usable as a cache key for expensive
+    #: derived state such as an ALS fold-in factor
+    #: (``(user_id, profile_version, model_version)``, rec-spec §9.2).
+    #:
+    #: Deliberately *not* invalidated by passive evidence: being shown a
+    #: recommendation, or opening a book, leaves it unchanged. Required
+    #: rather than optional — a cache key that might be absent is not a
+    #: cache key.
+    profile_version: str
 
 
 class HomeContext(BaseModel):
