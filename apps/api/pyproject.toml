@@ -36,6 +36,19 @@ dev = [
     "mypy>=1.13",
     "pandas-stubs>=2.2",
 ]
+# Offline artifact-build dependencies (ADR-0018, ADR-0021). NOT installed by
+# `uv sync` or `make setup`, and never imported by anything the API serves:
+# the API loads matrices, it never trains or encodes. Install explicitly with
+# `make setup-training` (or `uv sync --group training --project apps/api`)
+# before running the model builders.
+#
+# The runtime counterpart of each of these lives in the recommender package
+# as plain NumPy: ALS fold-in solves against fixed item factors without
+# `implicit`, and neighbour lookup is an array slice without `scipy`.
+training = [
+    "implicit>=0.7.2",
+    "scipy>=1.14",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -66,6 +79,14 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+# Offline training libraries: ship no type stubs, and are deliberately absent
+# from the default environment `make typecheck` runs in (they live in the
+# `training` group — ADR-0021). Typechecking must not require installing a
+# dependency set the API never uses.
+[[tool.mypy.overrides]]
+module = ["implicit.*", "scipy.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

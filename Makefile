@@ -10,6 +10,7 @@ LOCAL_PGHOST := localhost
         db-start db-stop db-shell \
         migrate import-data import-data-dry-run seed-demo build-popularity \
         build-source-similarity build-item-metadata build-recommender-artifacts \
+        build-als build-item-cf setup-training \
         test lint typecheck e2e generate-api-client
 
 help: ## Show this help
@@ -21,6 +22,10 @@ help: ## Show this help
 setup: ## Install backend (uv workspace) and frontend (npm) dependencies
 	uv sync --all-packages
 	cd apps/web && npm install
+
+setup-training: ## Additionally install the offline model-training dependencies (ADR-0021)
+	uv sync --all-packages --group training
+	@echo "Training deps installed. 'make setup' prunes them again - the API never needs them."
 
 dev: ## Reminder: run the API and web dev servers (two terminals; no Docker required)
 	@echo "Run 'make dev-api' and 'make dev-web' in separate terminals."
@@ -91,7 +96,13 @@ build-source-similarity: ## Export resolved Goodreads similarity edges to an art
 build-item-metadata: ## Build the compact item-metadata artifact (title/author/genre)
 	cd apps/api && uv run python -m book_app.cli.build_item_metadata
 
-build-recommender-artifacts: build-popularity build-source-similarity build-item-metadata ## Build every recommender artifact currently implemented
+build-als: ## Train and export the ALS artifact (needs 'make setup-training')
+	cd apps/api && uv run --group training python -m book_app.cli.build_als --sweep
+
+build-item-cf: ## Build the item-item CF artifact (needs 'make setup-training')
+	cd apps/api && uv run --group training python -m book_app.cli.build_item_cf --sweep
+
+build-recommender-artifacts: build-popularity build-source-similarity build-item-metadata build-als build-item-cf ## Build every recommender artifact currently implemented
 	@echo "Recommender artifacts rebuilt. Note: 'make import-data' invalidates them (see ADR-0014)."
 
 ## --- Quality gates -----------------------------------------------------------

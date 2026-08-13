@@ -89,13 +89,24 @@ artifacts/
   popularity/latest/         manifest.json  mapping.npz  scores.npz
   source_similarity/latest/  manifest.json  mapping.npz  graph.npz
   item_metadata/latest/      manifest.json  mapping.npz  items.npz
+  als/latest/                manifest.json  mapping.npz  item_factors.npy
+  item_cf/latest/            manifest.json  mapping.npz  neighbors.npz
+  evaluation/                <model>-<version>.json / .txt
 ```
 
-`als/`, `item_cf/` and `content/` join them in recommender phases R4-R5.
+`content/` joins them in recommender phase R5.
+
+The two collaborative-filtering families train from
+`processed/interactions.parquet` and need the offline training dependencies:
+run `make setup-training` once, then `make build-als` / `make build-item-cf`.
+`evaluation/` holds the offline scorecards each build produces (rec-spec
+§23.1) — a build history kept deliberately outside the served artifact
+directories, not application state.
 
 Gitignored except for `.gitkeep`: everything here is regeneratable via
 `make build-recommender-artifacts` (or the per-family targets), never
-hand-edited or committed. About 6.7 MB for the current 92,524-book catalog.
+hand-edited or committed. About 88 MB for the current 92,524-book catalog,
+mostly the 45 MB ALS factor matrix and the 36 MB item-CF neighbour graph.
 This is the default `artifact_storage_local_path` in `Settings`
 (`core/config.py`) and the read-only mount target for the `api` service in
 `docker-compose.yml`.

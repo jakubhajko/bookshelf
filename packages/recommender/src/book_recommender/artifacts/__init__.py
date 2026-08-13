@@ -23,6 +23,17 @@ R4/R5 without touching the layers beneath.
 
 from __future__ import annotations
 
+from book_recommender.artifacts.als import (
+    AlsArtifact,
+    load_als_artifact,
+    write_item_factors,
+)
+from book_recommender.artifacts.item_cf import (
+    ItemCfNeighbors,
+    ItemNeighbor,
+    load_item_cf_artifact,
+    write_item_cf_neighbors,
+)
 from book_recommender.artifacts.item_metadata import (
     ItemMetadataRow,
     ItemMetadataTable,
@@ -67,17 +78,20 @@ from book_recommender.artifacts.source_similarity import (
 from book_recommender.artifacts.writer import WrittenArtifact, write_artifact
 
 __all__ = [
-    "MANIFEST_FILENAME",
-    "MANIFEST_SCHEMA_VERSION",
-    "MAPPING_FILENAME",
+    "AlsArtifact",
     "ArtifactBundle",
     "ArtifactFile",
     "ArtifactManifest",
     "CatalogSnapshot",
+    "ItemCfNeighbors",
     "ItemMapping",
     "ItemMetadataRow",
     "ItemMetadataTable",
+    "ItemNeighbor",
     "LocalArtifactStorage",
+    "MANIFEST_FILENAME",
+    "MANIFEST_SCHEMA_VERSION",
+    "MAPPING_FILENAME",
     "MappingResolution",
     "MappingStatus",
     "PopularityArtifact",
@@ -86,13 +100,17 @@ __all__ = [
     "UnsafeArtifactKeyError",
     "WrittenArtifact",
     "build_csr",
+    "load_als_artifact",
     "load_artifact_bundle",
+    "load_item_cf_artifact",
     "load_item_metadata_artifact",
     "load_popularity_artifact",
     "load_source_similarity_artifact",
     "resolve_item_mapping",
     "verify_artifact_files",
     "write_artifact",
+    "write_item_cf_neighbors",
+    "write_item_factors",
     "write_item_metadata",
     "write_popularity_scores",
     "write_source_similarity_graph",

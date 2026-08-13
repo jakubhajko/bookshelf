@@ -983,8 +983,8 @@ repository valid, tested and resumable.
 | R0 | Reconcile, baseline, lock architectural decisions | done |
 | R1 | Interaction instrumentation, attribution, impression correctness | done |
 | R2 | Rich user context, profile version, cold-start taste seeds | done |
-| R3 | Artifact substrate, data validation, source-similarity export | **done, this pass** |
-| R4 | CF artifacts: ALS + item-item | not started |
+| R3 | Artifact substrate, data validation, source-similarity export | done |
+| R4 | CF artifacts: ALS + item-item | **done, this pass** |
 | R5 | Content embeddings, multi-interest profiling, human inspection | not started |
 | R6 | Candidate-generator framework and the five generators | not started |
 | R7 | Surface config, weighted RRF, deterministic ranking, UX reranking | not started |
@@ -1475,7 +1475,7 @@ trade-off.
   `tests/integration/test_recommendation_context.py` (21) — **new**.
 - `apps/web/src/api/generated/schema.d.ts`, `openapi.json` — regenerated.
 
-### Phase R3 — Artifact substrate, data validation and source-similarity export — **done, this pass**
+### Phase R3 — Artifact substrate, data validation and source-similarity export — **done**
 
 Goal: build the artifact machinery the next four phases stand on, before
 there is a large model to debug through it. No recommendation *behavior*
@@ -1687,12 +1687,210 @@ Tests (+93):
 No migration, no OpenAPI change, no frontend change: R3 touches no schema,
 no route and nothing under `apps/web`.
 
-### Phases R4-R9 — not started
+### Phase R4 — Collaborative-filtering artifacts: ALS + item-item — **done, this pass**
+
+Goal: build, evaluate, serialize and load both collaborative candidate
+sources. No serving behavior changed — `wiring.py` still loads only the
+popularity artifact, and `FuturePipelineRecommendationEngine` is still the
+unused plug point. R6 is what consumes these.
+
+#### R4 checklist
+
+- [x] Shared interaction transform: schema validated rather than assumed,
+  `work_id` resolved onto the live catalog, versioned confidence transform,
+  counts reported by rating bucket **and** mapping status.
+- [x] ALS trained offline over a five-config grid with a documented
+  per-user random holdout; winner retrained on the full dataset.
+- [x] Item factors, mapping and training configuration persisted; historical
+  user factors deliberately **not**.
+- [x] Live-user fold-in in plain NumPy against fixed item factors.
+- [x] Item-item CF: cosine baseline and popularity-aware BM25 compared on
+  held-out data; V1 default selected on metrics *plus* coverage/popularity.
+- [x] Top-K neighbours persisted compactly; runtime generator seeds from
+  current positive items with no retraining.
+- [x] Machine- and human-readable evaluation reports with Recall@K, NDCG@K,
+  Precision/MAP@K, catalog coverage, popularity concentration and config.
+- [x] Training-only dependencies in a group the API runtime does not install
+  — verified by pruning, not just declared (ADR-0021).
+- [x] Full gates green; live training run against the real 775k-row dataset.
+
+#### Drift item 13 closed — the last one
+
+`interactions.parquet` has a consumer. Present and unread since Phase 2,
+it is now the training input for both CF families. The drift ledger opened
+in R0 with fifteen items is empty.
+
+Schema validated against the real file rather than trusted: `user_id`
+int32, `work_id` string, `rating` int8, `is_explicit` bool, 775,090 rows,
+83,200 users, 92,526 works, no nulls. `rating == 0` occurs 474,910 times
+and coincides exactly with `is_explicit == False`, which is what rec-spec
+§7.2's implicit-positive rule depends on — so the transform now rejects a
+row claiming to be an explicit 0 rather than silently mis-weighting it.
+
+#### What the transform does with the real data
+
+| Bucket | Rows | Treatment |
+|---|---:|---|
+| rating 0 (implicit) | 474,910 | weakest positive, confidence 1.0 |
+| rating 6 (neutral) | 24,195 | **dropped** by default; swept as a variant |
+| ratings 7-10 | 232,392 | positive, confidence 2.0 → 5.0 |
+| ratings 1-5 | 43,593 | **dropped** — omitted, not trained as negatives |
+| unresolved `work_id` | 5 | **dropped and reported** (2 distinct works) |
+| **used** | **707,297** | 76,369 users × 88,864 items |
+
+The counts reconcile exactly: 707,297 + 5 + 43,593 + 24,195 = 775,090.
+Exactly 2 of the parquet's 92,526 works are absent from the 92,524-book
+catalog, which is the drop-and-report path running on real data rather than
+on a fixture.
+
+rec-spec §7.2's rules are enforced structurally, not by comment: historical
+`user_id` is remapped to a dense training index and never leaves the
+transform in a form joinable to a `users` row, no timestamps exist so
+nothing weights or splits by recency, and ratings 1-5 are omitted rather
+than fed to ALS as negative confidence.
+
+#### Model selection, and the criterion that changed a decision
+
+Both sweeps evaluate on a per-user random holdout (rec-spec §23.1 — random
+because the data has no timestamps and a temporal split would be fiction):
+20% of each reader with ≥5 positives, capped at 20 items, 15,747 readers
+evaluated.
+
+ALS, five configs, NDCG@50:
+
+| config | recall@10 | ndcg@10 | recall@50 | ndcg@50 |
+|---|---:|---:|---:|---:|
+| f64-r0.05 | 0.0548 | 0.0421 | **0.1180** | 0.0600 |
+| f96-r0.05 | 0.0564 | 0.0449 | 0.1174 | 0.0621 |
+| **f128-r0.05** | **0.0587** | **0.0468** | 0.1179 | **0.0633** |
+| f96-r0.01 | 0.0565 | 0.0450 | 0.1172 | 0.0621 |
+| f96-r0.10 | 0.0563 | 0.0449 | 0.1171 | 0.0620 |
+
+Factor count helps; regularization is nearly inert across 0.01-0.10.
+
+Item-CF, two variants — where the criterion mattered:
+
+| variant | ndcg@10 | recall@50 | ndcg@50 | coverage | Gini |
+|---|---:|---:|---:|---:|---:|
+| cosine-k100 | **0.0215** | 0.0347 | 0.0241 | 0.399 | 0.577 |
+| **bm25-k100** | 0.0208 | **0.0420** | **0.0258** | **0.547** | **0.374** |
+
+The first implementation selected on NDCG@10 and shipped cosine on a 3%
+edge. That is the wrong stage to measure: these are **candidate
+generators** feeding weighted RRF (ADR-0017), not the final ranker, so what
+matters is getting relevant items into a deep pool in a sensible rank
+order. Selection moved to `SELECTION_K = 50`, which ships BM25 — 21% better
+at candidate depth, 37% more catalog coverage, far less popularity
+concentration, and what rec-spec §10's "plus coverage/popularity behavior"
+points at. ALS picks f128 under either criterion, so the rule was not
+reverse-engineered from a preferred answer. ADR-0021 records it.
+
+#### A bug the tests found in this phase's own code
+
+The BM25 implementation multiplied each item's column by its IDF — and
+`train_item_neighbors` L2-normalizes each item vector before comparing.
+Normalization cancels a scalar multiple exactly, so the IDF term was
+arithmetic with no effect that read like popularity correction. Caught by a
+test asserting BM25 would down-weight a ubiquitous item, which failed with
+the two maxima equal to seven decimal places.
+
+Removed, with the reasoning recorded where the next reader will need it.
+What "BM25" means here is the two terms that survive normalization: `k1`
+saturation and `b` user-length normalization — a reader with 500 books
+provides weaker per-book evidence than one with 5. That is a genuine
+popularity correction, expressed on the user side, and it is what produces
+the coverage and Gini improvements above. The replacement test constructs
+two items with identical co-occurrence counts reached through prolific
+versus focused readers, and asserts cosine ties them while BM25 separates
+them.
+
+#### Decisions worth recording
+
+- **Historical user factors are never persisted.** rec-spec §9.1 calls them
+  optional; they are excluded outright, because 83,200 Book-Crossing user
+  vectors describe people who are not application users and nothing may
+  join them. A test asserts the artifact directory contains exactly
+  `manifest.json`, `mapping.npz`, `item_factors.npy` and that the manifest
+  text contains no occurrence of "user".
+- **The winner is retrained on the full dataset.** The holdout exists to
+  rank configurations; shipping a model that never saw 20% of the evidence
+  would waste it.
+- **Fold-in is plain NumPy in the recommender package.** The standard
+  implicit-ALS solve, with `YᵀY` precomputed once at load because it does
+  not depend on the user. This is what keeps `implicit` out of the API
+  runtime while still serving what it trained: 6 ms for a fold-in plus a
+  92k-item scoring pass.
+- **A cold user gets `None`, not a zero vector.** Scoring against zeros
+  would rank the catalog by nothing while looking like it worked, so the
+  caller is told to fall back.
+- **Exclusions are applied before top-K selection**, not by over-fetching
+  and filtering after, so a heavily-excluded reader still gets a full page.
+- **Item-CF aggregation is additive across seeds**, deliberately: a book
+  reachable from several of a reader's books *should* outrank one reachable
+  from a single book. rec-spec §7.1's warning about "uncontrolled
+  double-counting" applies to the seed weights the caller supplies, which is
+  where R6 will cap it.
+- **Both families share the catalog's item order.** The training matrix
+  spans the whole catalog rather than only interacted items, so column *i*
+  is `model_item_index` *i* in every artifact. An integration test loads
+  both families and asserts they agree book-for-book.
+- **Nothing was wired into the serving path.** rec-spec sequences candidate
+  generators into R6 and the pipeline engine into R8. `wiring.py` contains
+  no reference to either loader, and loading 81 MB of artifacts that nothing
+  consumes would cost memory per worker for no benefit.
+
+#### Changed files (R4)
+
+New:
+
+- `packages/recommender/.../artifacts/als.py` — `AlsArtifact`, fold-in,
+  scoring, exclusion-aware top-K.
+- `packages/recommender/.../artifacts/item_cf.py` — `ItemCfNeighbors`,
+  seed-based candidate aggregation.
+- `apps/api/.../recommendations/interaction_transform.py` — the shared
+  transform (pure pandas/NumPy).
+- `apps/api/.../recommendations/cf_evaluation.py` — holdout + metrics +
+  report writer (pure NumPy).
+- `apps/api/.../recommendations/cf_training.py` — **the only module that
+  imports `implicit` or `scipy`**.
+- `apps/api/src/book_app/cli/build_als.py`, `build_item_cf.py`.
+- `docs/adr/0021-training-dependency-isolation-and-cf-model-selection.md`.
+
+Changed:
+
+- `packages/recommender/.../config.py` — `HistoricalInteractionTransform`,
+  `AlsConfig`/`ItemCfConfig` + sweeps, `HoldoutConfig`, `SELECTION_K`,
+  `ALS`/`ITEM_CF` families.
+- `packages/recommender/.../artifacts/__init__.py` — new exports.
+- `apps/api/pyproject.toml` — `training` dependency group; mypy overrides so
+  the default gate typechecks without it installed.
+- `Makefile` — `setup-training`, `build-als`, `build-item-cf`;
+  `build-recommender-artifacts` now covers all five families.
+
+Tests (+99):
+
+- `packages/recommender/tests/test_als_artifact.py` (18) — **new**.
+- `packages/recommender/tests/test_item_cf_artifact.py` (14) — **new**.
+- `apps/api/tests/test_interaction_transform.py` (17) — **new**.
+- `apps/api/tests/test_cf_evaluation.py` (23) — **new**.
+- `apps/api/tests/test_cf_training.py` (16) — **new**, skipped as a module
+  without the training group.
+- `tests/integration/test_build_cf_artifacts.py` (11) — **new**, likewise.
+
+83 of the 99 run in the default environment. The 16 that need `implicit`
+and `scipy` are the trainers themselves; everything they produce — fold-in,
+neighbour retrieval, exclusions, determinism of the *artifact* — is covered
+without the group, so the default gate still fails if R4's runtime
+behaviour breaks.
+
+No migration, no OpenAPI change, no frontend change.
+
+### Phases R5-R9 — not started
 
 Scope, tasks and per-phase acceptance criteria live in
 `RECOMMENDER_IMPLEMENTATION_PLAN.md` and are not duplicated here. Each phase
 appends its own record to this section as it lands, in the same shape as
-R0-R3 above: checklist, drift found, decisions/ADRs, changed files,
+R0-R4 above: checklist, drift found, decisions/ADRs, changed files,
 commands run with real results, and unresolved risks appended to §6.
 
 Standing constraints for every recommender phase (from `CLAUDE.md` and
@@ -2568,6 +2766,96 @@ row, so the batch is attributable to the exact artifact that produced it.
 Server logs clean: `{200: 3, 201: 1}` plus the 422/401 from two deliberately
 malformed probe requests, no error-level entries, no tracebacks.
 
+## 5m. Recommender Phase R4 validation commands and results
+
+```bash
+# The training dependency group, and the proof that it is actually separate:
+make setup-training          # + implicit 0.7.3, scipy 1.18.0, threadpoolctl,
+                             #   tqdm — 4.4s, wheels, no source builds
+uv sync --all-packages       # prunes all four back out again
+python -c "import implicit"  # ImportError -> the API env is genuinely clean
+uv run --group training ...  # rehydrates in 15ms for the builders
+
+# Default environment (training group NOT installed) — the normal gate:
+make test
+# apps/api             185 passed, 1 skipped   (was 145)
+#     the skip is test_cf_training.py's 16 tests, skipped as one module by
+#     importorskip because implicit/scipy are absent — which is the point
+# packages/recommender  143 passed             (was 111 — +32 ALS/item-CF)
+# apps/web               93 passed             (unchanged — no frontend work)
+make lint                    # clean, all four targets
+make typecheck               # clean: 133 + 41 source files, apps/web
+#   typechecks WITHOUT the training group installed, by design — mypy
+#   overrides treat implicit/scipy as untyped (ADR-0021)
+uv run --project apps/api pytest tests/integration -q
+#                      181 passed, 1 skipped   (was 181 + 0)
+
+# With the training group, the skipped suites actually run:
+uv run --project apps/api --group training pytest -q          # 201 passed
+uv run --project apps/api --group training pytest tests/integration -q
+#                      192 passed
+```
+
+**The real training runs**, against the full 775,090-row dataset and the
+92,524-book catalog:
+
+```bash
+make build-als        # 5-config sweep + full retrain — ~4 min
+make build-item-cf    # 2-variant sweep + full rebuild — 31s
+```
+
+```text
+als: 92524 items          item_cf: 92524 items
+  rows_total  775090        edges              7,606,357
+  rows_used   707297        items_with_neighbors  87,355
+  dropped: unresolved 5, ratings 1-5 43,593, rating 6 24,195
+  users 83,200 -> 76,369 used, 15,747 evaluated
+  selected f128-r0.05-i20   selected bm25-k100
+  ndcg@50 0.0633            ndcg@50 0.0258, coverage 0.547, gini 0.374
+```
+
+Counts reconcile exactly: 707,297 + 5 + 43,593 + 24,195 = 775,090.
+
+**Both models load and serve sensibly**, verified against the real catalog
+by folding in a reader whose only evidence is *Dune*:
+
+```text
+als      0.67s   92,524 items x 128 factors     status=ok
+item_cf  0.88s   92,524 items, 7,606,357 edges  bm25, k=100
+fold-in + scoring all 92k items: 6ms
+
+ALS candidates                        item-CF candidates
+  0.073 The Silence of the Lambs        0.189 Children of Dune
+  0.069 Children of Dune                0.132 Dune Messiah
+  0.068 Dune Messiah                    0.119 TekVengeance (TekWar #4)
+  0.064 Ender's Game                    0.117 The Watch
+  0.059 Timeline                        0.114 Midnight at the Well of Souls
+  0.057 The Hobbit                      0.114 Already Dead
+  0.055 God Emperor of Dune             0.105 Soldat (German soldier memoir)
+```
+
+Both surface the Dune sequels from a single Dune seed. ALS stays inside
+recognisable science fiction and fantasy; item-CF is sharper at the top and
+noisier below it — which is the accuracy-versus-coverage split the metrics
+already predicted, visible in actual titles.
+
+**No serving behavior changed.** `wiring.py` contains zero references to
+either loader (`grep -c` = 0); the popularity artifact is still the only one
+loaded at startup, and `FuturePipelineRecommendationEngine` is still the
+unused plug point. Candidate generators are R6, pipeline integration is R8.
+
+```text
+data/artifacts/  (88 MB total, was 6.7 MB)
+  als/latest/          item_factors.npy 45M  mapping.npz 564K  manifest 4K
+  item_cf/latest/      neighbors.npz    36M  mapping.npz 564K  manifest 4K
+  evaluation/          als-*.json/.txt, item_cf-*.json/.txt
+
+model_versions: all five families ACTIVE, manifests 711-832 bytes each
+```
+
+E2E was **not** re-run: R4 changes no route, no schema and no frontend code.
+Last verified green in §5j.
+
 ## 6. Risks and assumptions
 
 Recorded per CLAUDE.md: "For a genuinely unspecified detail, choose a
@@ -3397,8 +3685,16 @@ conservative, reversible default and document it."
     per worker, plus a 1.56 MB `model_versions.manifest` row. Replaced by a
     504 KB `mapping.npz`; three families now load in 1.8 s / 77 MB
     *including every payload*. ADR-0020, §3R "Drift items closed".
-81. **The heavy offline ML dependencies are still not in any manifest, but
-    the resolution unknown is closed.** Probed in R3 before committing
+81. ~~**The heavy offline ML dependencies have never been resolved.**~~
+    **Closed in R4 for the CF stack.** `implicit 0.7.3` and `scipy 1.18.0`
+    install from wheels in 4.4s on darwin/arm64 and train correctly — no
+    source builds, no OpenMP problems. They live in a `training` dependency
+    group that `uv sync --all-packages` provably prunes back out (ADR-0021).
+    **The transformer stack remains unexercised**: resolution is known to
+    work (see below) but `torch`/`sentence-transformers` have never been
+    downloaded or run here, and an embedding build over 92,524 books has
+    never been timed. R5 carries that, and it is a much larger download than
+    anything R4 needed. Original R3 probe, still current: Probed in R3 before committing
     anything, resolution-only (`uv pip compile`, no wheel downloads): the
     full stack resolves cleanly in 1.2 s on darwin/arm64 with uv 0.10.4 —
     `numpy 2.5.2`, `scipy 1.18.0`, `scikit-learn 1.9.0`, `implicit 0.7.3`,
@@ -3529,41 +3825,85 @@ conservative, reversible default and document it."
     the mapping validator R3 built is what will drop and report the rows
     that do not resolve to catalog items.
 
+### Recommender Phase R4
+
+98. **ALS recommends a narrow slice of the catalog.** Catalog coverage is
+    0.035-0.046 with a Gini of ~0.86, against item-CF's 0.547 and 0.374 on
+    the same holdout. ALS is the more accurate generator and by far the more
+    concentrated one, which is ordinary for ALS on sparse implicit data but
+    matters directly for R6/R7: fusing it at a high RRF weight would import
+    that concentration into the feed. The two families are complementary
+    rather than interchangeable, and the surface reranker (ADR-0017) is
+    where the balance has to be struck.
+99. **Offline metrics are low in absolute terms.** Recall@10 ≈ 0.059 and
+    NDCG@10 ≈ 0.047 for the shipped ALS. That is unremarkable for
+    Book-Crossing — 707k positives over 92k items is extremely sparse, and
+    61% of the evidence is implicit with no rating — but it means these
+    numbers are useful as a *relative* comparison between configurations and
+    should not be read as a prediction of live quality. Live behavior is
+    driven by application evidence these models never saw.
+100. **The historical model cannot know about the application's own
+    catalog activity.** ALS item factors come entirely from Book-Crossing
+    readers; a book that no historical reader touched has a factor driven
+    only by regularization, and 3,660 catalog items (92,524 − 88,864) have
+    no historical interaction at all. Those books are effectively invisible
+    to both CF families and will depend on the content and source-similarity
+    generators (R5, already-built R3) for any exposure.
+101. **Top-K tie-breaking in the neighbour build is arbitrary, though
+    deterministic.** `argpartition` selects among equal similarity scores
+    without regard to index order, so which of several tied neighbours
+    survives the top-K cut is unprincipled — it is stable across rebuilds
+    (the determinism test passes and checksums match), but it is not the
+    lowest-index or otherwise meaningful choice. Harmless at k=100 on real
+    data where exact ties are rare; it surfaced while building a test
+    fixture where 32 candidates tied exactly.
+102. **Item-CF evaluation uses 3,000 of the 15,747 holdout readers.** The
+    neighbour scan is per-seed rather than one matrix product, so scoring
+    every holdout reader would dominate the build. The subset is a
+    deterministic prefix, which is enough to separate two variants but makes
+    item-CF's absolute metrics noisier than ALS's, and the two families'
+    numbers are not directly comparable at equal confidence.
+103. **The frontend test suite is timing-sensitive under load.** Running
+    `make test` while a training sweep occupied the CPU produced two, then
+    one, spurious vitest failures at 11-29s durations; the same suite passes
+    in 5.7s unloaded, and no frontend file was touched this phase. Not
+    introduced by R4, but R4 is the first phase whose builds are heavy
+    enough to trigger it — worth knowing before someone debugs a "flaky"
+    frontend regression that is really CPU starvation.
+
 ## 7. Next phase
 
-**Recommender Phase R4 — collaborative-filtering artifacts: ALS and
-item-item.** Scope and acceptance criteria are in
-`RECOMMENDER_IMPLEMENTATION_PLAN.md`. It is the first consumer of
-`data/processed/interactions.parquet` (drift item 13, the last one open),
-and the first phase to train anything.
+**Recommender Phase R5 — content embeddings, multi-interest profiling and
+human inspection.** Scope and acceptance criteria are in
+`RECOMMENDER_IMPLEMENTATION_PLAN.md`; ADR-0016 governs multi-interest
+profiling and ADR-0018 the swappable offline encoder.
 
-What R3 leaves it, so it does not have to be rebuilt:
+What R5 inherits, so it does not rebuild it:
 
-- `write_artifact` / `load_artifact_bundle` — a new family is a module
+- the artifact substrate (ADR-0014/ADR-0020) — a new family is a module
   under `book_recommender/artifacts/` plus an entry in
-  `book_recommender.config.FAMILIES`; no application wiring learns a file
-  format (ADR-0014, ADR-0020).
-- `save_array` with `mmap` for the factor matrices, which are the first
-  payloads large enough to want it.
-- The mapping validator R4's shared interaction transform needs directly:
-  `work_id` resolves to catalog items, unresolved rows are dropped **and
-  counted**, and no user identity exists in the artifact contract at all —
-  which is the structural half of rec-spec §7.2's rule that historical
-  Book-Crossing integers are not application UUID users.
-- Determinism and checksums, so "neighbour artifacts deterministic for
-  fixed config" is asserted the same way the R3 builders assert it.
+  `book_recommender.config.FAMILIES`;
+- `save_array` with `mmap`, which the embedding matrix is the first payload
+  genuinely large enough to need (92,524 × 512 float32 ≈ 190 MB);
+- the `training` dependency group and its isolation guards (ADR-0021) —
+  `sentence-transformers` goes in beside `implicit`, and the two tests that
+  fail if it reaches a runtime dependency set already exist;
+- the **item-metadata artifact's tag columns**, written empty in R3 with
+  `tags_version: null` precisely so R5 fills a contract that is already
+  tested in both its empty and populated shapes.
 
-What R4 must decide that R3 deliberately did not: where training-only
-dependencies live. A non-default uv dependency group is the intended shape
-(ADR-0018); R3 added no such dependency, so it created a guard rather than
-an empty group. Resolution is known to work (risk #81); download and build
-*cost* on this platform is not.
+The genuine unknown R5 carries is cost, not feasibility (risk #81): the
+transformer stack resolves, but `torch` has never been downloaded here and
+an embedding pass over 92,524 books has never been timed on this hardware.
+That is a far larger download than anything R4 needed, and it is the first
+thing to measure rather than assume.
 
-R4 has not been started. Do not begin it as part of an R3 pass.
+R5 has not been started. Do not begin it as part of an R4 pass.
 
-Drift-item ledger: R1 closed items 4-8 and 14; R2 closed item 9; R3 closed
-items 10, 11, 12 and 15. **Only item 13 remains** —
-`interactions.parquet` has no consumer — and R4 is it.
+**The drift-item ledger is closed.** R1 closed items 4-8 and 14; R2 closed
+item 9; R3 closed 10, 11, 12 and 15; R4 closed item 13, the last one —
+`interactions.parquet` has a consumer. Everything the R0 architectural
+inspection found has been either fixed or superseded by an ADR.
 
 ### The application sequence is complete
 

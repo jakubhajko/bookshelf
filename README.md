@@ -87,10 +87,13 @@ make migrate                 apply Alembic migrations
 make import-data[-dry-run]   import books.parquet into PostgreSQL
 make cleanup-sessions        delete expired/revoked auth sessions
 make seed-demo               create the demo_reader account with representative shelves/ratings
-make build-recommender-artifacts  build every recommender artifact (see below)
+make setup-training          install the offline model-training deps (ADR-0021)
+make build-recommender-artifacts  build every recommender artifact
 make build-popularity        build the popularity recommendation artifact
 make build-source-similarity export resolved Goodreads similarity edges
 make build-item-metadata     build the compact item-metadata artifact
+make build-als               train + export ALS (needs setup-training)
+make build-item-cf           build item-item CF (needs setup-training)
 make e2e                     Playwright critical-flow tests (spec §13.5) — needs a running, migrated API
 make generate-api-client     frontend client from the OpenAPI schema
 ```
@@ -125,9 +128,10 @@ state); and, new in the final phase, root/route-level error boundaries
 and a toast notification system wired into every optimistic mutation's
 failure path.
 
-348 tests total: 241 apps/api (unit + integration against real
-PostgreSQL, 94% combined coverage — spec §13.6's 75% floor), 38
-recommender package, 69 frontend, plus one Playwright end-to-end test
+348 tests at the end of the application phases: 241 apps/api (unit +
+integration against real PostgreSQL, 94% combined coverage — spec §13.6's
+75% floor), 38 recommender package, 69 frontend, plus one Playwright
+end-to-end test
 covering spec §13.5's full 13-step critical flow (register through
 re-login, with two accessibility scans folded in) against a real
 Chromium browser — see
@@ -137,6 +141,14 @@ checked off item by item. The E2E test is where two real optimistic
 -update race conditions in `useBookState.ts` were found and fixed this
 phase (plan.md risk #68) — both reachable by any user clicking normally,
 neither caught by any jsdom test before.
+
+Recommender phases R0-R4 have since added the interaction/attribution
+layer, the artifact substrate, and both collaborative-filtering families,
+taking the suite to 621 tests (185 apps/api unit + 143 recommender + 93
+frontend + 181 integration in the default environment; 16 trainer tests and
+11 CF builder tests additionally run with `make setup-training`). See
+[`docs/implementation/plan.md`](docs/implementation/plan.md) §3R for the
+per-phase record.
 
 The one unchecked item in spec §19's Quality list: `docker compose up` is
 authored (both Dockerfiles are now production-shaped multi-stage builds)
