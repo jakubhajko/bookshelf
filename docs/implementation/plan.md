@@ -982,8 +982,8 @@ repository valid, tested and resumable.
 |---|---|---|
 | R0 | Reconcile, baseline, lock architectural decisions | done |
 | R1 | Interaction instrumentation, attribution, impression correctness | done |
-| R2 | Rich user context, profile version, cold-start taste seeds | **done, this pass** |
-| R3 | Artifact substrate, data validation, source-similarity export | not started |
+| R2 | Rich user context, profile version, cold-start taste seeds | done |
+| R3 | Artifact substrate, data validation, source-similarity export | **done, this pass** |
 | R4 | CF artifacts: ALS + item-item | not started |
 | R5 | Content embeddings, multi-interest profiling, human inspection | not started |
 | R6 | Candidate-generator framework and the five generators | not started |
@@ -1335,7 +1335,7 @@ Tests:
 - `components/ShelfSelectorPopover.test.tsx` — two assertions updated for
   the new `syncBookShelves` arity.
 
-### Phase R2 — Rich user context, profile version and cold-start taste seeds — **done, this pass**
+### Phase R2 — Rich user context, profile version and cold-start taste seeds — **done**
 
 Goal: make the request context preserve the *structure* of a reader's
 preferences, and give derived state a sound cache key. No recommendation
@@ -1475,12 +1475,224 @@ trade-off.
   `tests/integration/test_recommendation_context.py` (21) — **new**.
 - `apps/web/src/api/generated/schema.d.ts`, `openapi.json` — regenerated.
 
-### Phases R3-R9 — not started
+### Phase R3 — Artifact substrate, data validation and source-similarity export — **done, this pass**
+
+Goal: build the artifact machinery the next four phases stand on, before
+there is a large model to debug through it. No recommendation *behavior*
+changed — the same popularity ranking is served, through an entirely
+different path.
+
+#### R3 checklist
+
+- [x] Artifact loading moved out of application wiring into the recommender
+  package's artifact layer (drift item 10, ADR-0014).
+- [x] `ArtifactManifest` preserved, but schema version 2: metadata plus
+  checksums, with the item mapping moved to a compact `mapping.npz`
+  (drift item 15, measured — ADR-0020).
+- [x] Catalog-version compatibility validation with three outcomes
+  (OK / DEGRADED / REJECTED) and safe degradation at every one.
+- [x] Reusable mapping validator: `work_id` durable, `book_id` runtime-local
+  and re-resolved, unresolved items dropped **and reported**, no user
+  identity in the artifact contract at all.
+- [x] Compact numeric helpers (`.npy`/`.npz`, optional mmap, deterministic
+  bytes, no pickle, safe paths).
+- [x] Source-similarity export: 269,276 resolved Goodreads edges as CSR.
+- [x] Every exported edge re-validated against active catalog items at
+  build time, not assumed from the import.
+- [x] Runtime source-similarity loader with rank and provenance preserved.
+- [x] Item-metadata artifact: stable ids, title, author, broad genre; tag
+  columns exist as a declared-empty contract for R5.
+- [x] `make build-recommender-artifacts` plus one target per family.
+- [x] Numerical dependency added; training-only stack kept out of the API
+  runtime set and guarded by a test (ADR-0018).
+- [x] Full gates green; live smoke test against the real 92,524-book catalog.
+
+#### Drift items closed
+
+**Item 10 — popularity parsing inline in `wiring.py`.** `wiring.py` no
+longer contains the word `json`. It builds a `CatalogSnapshot`, calls
+`load_popularity_artifact`, and logs the diagnostics; the format lives in
+`book_recommender.artifacts.popularity`, beside the writer the builder uses,
+so the two halves cannot drift.
+
+**Item 11 — source-similarity edges were PostgreSQL-only.** Exported. The
+build re-validated the import's invariant against real data rather than
+trusting it: 269,276 edges in the database, 269,276 exported, 0 dropped as
+out-of-catalog, 0 self-edges. The invariant holds — and now there is a
+builder that would say so if it stopped holding.
+
+**Item 12 — no numerical dependencies in the workspace.** NumPy is now a
+runtime dependency of both `packages/recommender` (it loads matrices) and
+`apps/api` (its builders write them). Nothing heavier was added: R3 needs
+no training-only dependency, and adding R4/R5's would be spillover. Risk
+#81's resolution unknown is separately resolved — see §6.
+
+**Item 15 — `ArtifactManifest.item_mapping` unmeasured at scale.** Measured,
+and it was worse than "probably fine":
+
+| | schema v1 | schema v2 |
+|---|---|---|
+| `manifest.json`, 92,524 items | 8.9 MB | 4 KB |
+| parse to objects | 0.22 s, ~55 MB | mapping is 504 KB of `.npz` |
+| `model_versions.manifest` row | 1.56 MB | ~750 bytes |
+| projected, five families/worker | ~1.1 s, ~275 MB | measured 1.8 s, 77 MB for three families *including all payloads* |
+
+ADR-0014's "compact numerical arrays over object graphs" pointed the right
+way and the measurement agreed. ADR-0020 records the format change.
+
+#### The bug this phase was really about
+
+The v1 loader served `manifest.item_mapping[i].book_id` directly. That is
+correct until the catalog is re-imported, after which PostgreSQL's
+autoincrement has handed those integers to different books and the artifact
+serves confident nonsense — the failure ADR-0014 calls "invisible, produces
+plausible-looking output". ADR-0014 already named `work_id` as the durable
+identity; nothing was *using* it.
+
+Loaders now re-resolve every item's `work_id` against the live catalog and
+serve the `book_id` that is correct now. Verified the way this document has
+verified regressions throughout: the integration test
+`test_a_reimport_that_reassigns_book_ids_still_serves_the_right_books` was
+run against a deliberately sabotaged resolver that returned the build-time
+id, confirmed to fail, and the fix restored.
+
+The consequence is more permissive, not less: a re-import no longer breaks
+artifact correctness at all, only freshness. Books added since the build are
+absent from candidates; books removed are dropped with a logged count.
+
+#### Degradation, verified rather than asserted
+
+The three outcomes and what each does:
+
+| Condition | Outcome | Behavior |
+|---|---|---|
+| missing / corrupt / v1 manifest / bad checksum | raise | caller logs and degrades |
+| >10% of items unresolved | REJECTED | not served, popularity floor |
+| some items unresolved | DEGRADED | served without them, count logged |
+| all resolved | OK | served |
+
+The v1-manifest case was smoke-tested live before rebuilding anything: the
+old 8.9 MB artifact was still on disk, and the app started clean, logged
+`popularity_artifact_unavailable` with a pydantic error naming the missing
+field, and served an empty ranking. No crash, no startup failure, and the
+log says what to do about it.
+
+#### Decisions worth recording
+
+- **Checksum verification defaults on.** It costs 3 ms for a 2.6 MB
+  artifact and catches the one failure a manifest cannot describe — a
+  half-written or partially-copied directory.
+- **Deterministic `.npz` is hand-rolled.** `np.savez` stamps zip members
+  from the wall clock, so byte-identical rebuilds are impossible with it and
+  a checksum can never prove reproducibility. `save_arrays` writes the
+  container with fixed timestamps and sorted members; there is a test that
+  two builds produce identical bytes, and integration tests that assert it
+  end to end from PostgreSQL.
+- **Strings are offsets + a UTF-8 blob**, not a NumPy unicode dtype. Fixed
+  width would pad every title to the longest: ~185 MB to store ~6 MB of
+  text, for 92k books. Also avoids object arrays, which need pickle.
+- **`allow_pickle=False` everywhere, and non-array bundle members are
+  rejected.** NumPy returns raw `bytes` for a zip member that is not
+  `.npy`-formatted rather than complaining — it does not unpickle it, but it
+  does not object either, so a pickle payload would flow onward as a 0-d
+  bytes array. Now it fails at the loader.
+- **Manifest filenames must be plain filenames.** `LocalArtifactStorage`
+  only refuses escapes from the storage *root*, so
+  `../popularity/latest/scores.npz` would stay inside the root while reading
+  a sibling artifact. Found while writing the path-traversal test, which
+  did not fail as expected — the test was right about the risk and wrong
+  about the existing defence. The format now forbids separators.
+- **Stale files are reported, not deleted.** Rebuilding popularity left the
+  v1 `scores.json` behind. The loader reads only what the manifest declares,
+  so it is inert; a builder that deletes unrecognized files in a directory
+  it was merely pointed at is a worse failure than a stale one. The build
+  prints a warning naming them.
+- **The manifest is written last.** A crash mid-build leaves a directory
+  with no manifest, which the loader treats as "no artifact" and degrades
+  past — better than a manifest describing files that do not exist yet.
+- **The item space is the whole active catalog**, not just books a family
+  has data for. All families share one `model_item_index` space, so a book
+  with no source neighbours still gets an index and an empty CSR row.
+- **Each family writes its own `mapping.npz`.** Families order items
+  differently — popularity's order *is* its ranking — so sharing one would
+  force an indirection on every family to save ~500 KB.
+- **Tag columns ship empty with `tags_version: null`.** The implementation
+  plan's own instruction for this task. A *declared* absence: tags present
+  without a version and a version without tags are both rejected, and the
+  populated shape is tested now so R5 fills a contract known to work.
+- **One startup database read is not an inference-time read.** The catalog
+  identity table (92,524 rows, 0.14 s) is read once at provider
+  construction, before any engine exists. ADR-0007 forbids an open
+  transaction *during* inference; `wiring.py` already opened a session there
+  for the mock pool.
+- **The training dependency group lands with R4.** R3 has no training-only
+  dependency to put in it, and creating an empty one proves nothing. What
+  R3 owes the constraint is a *guard*, and there are now two — one per
+  package — that fail if the encoder stack reaches a runtime dependency set.
+
+#### Changed files (R3)
+
+New in `packages/recommender/src/book_recommender/`:
+
+- `config.py` — typed `ArtifactFamily` registry (rec-spec §26's first
+  category; the tuning categories belong to R6/R7).
+- `artifacts/numeric.py` — deterministic `.npz`, `.npy` + mmap, string
+  columns, checksums, typed column accessors.
+- `artifacts/mapping.py` — `ItemMapping`, `CatalogSnapshot`,
+  `resolve_item_mapping`, `MappingResolution`/`MappingStatus`.
+- `artifacts/loader.py` — `load_artifact_bundle`, `verify_artifact_files`.
+- `artifacts/writer.py` — `write_artifact`, checksums computed from the
+  files actually written.
+- `artifacts/popularity.py`, `artifacts/source_similarity.py`,
+  `artifacts/item_metadata.py` — one module per family.
+
+Changed:
+
+- `artifacts/manifest.py` — schema version 2; `ArtifactItemMapping` removed,
+  `ArtifactFile` added, filename validation.
+- `artifacts/__init__.py` — layered re-exports.
+- `apps/api/.../recommendations/wiring.py` — selects and constructs only.
+- `apps/api/.../recommendations/artifact_paths.py` — family constants moved
+  to the recommender package; `build_artifact_storage`,
+  `read_catalog_snapshot` added.
+- `apps/api/.../recommendations/artifact_build.py` — **new**, shared build
+  support (`ArtifactBuildReport`, `new_model_version`,
+  `register_model_version`).
+- `apps/api/.../books/repository.py` — `get_active_catalog_identities`.
+- `apps/api/src/book_app/cli/build_popularity.py` — rewritten onto the
+  substrate.
+- `apps/api/src/book_app/cli/build_source_similarity.py` — **new**.
+- `apps/api/src/book_app/cli/build_item_metadata.py` — **new**.
+- `Makefile` — `build-source-similarity`, `build-item-metadata`,
+  `build-recommender-artifacts`.
+- `packages/recommender/pyproject.toml`, `apps/api/pyproject.toml` — NumPy.
+- `docs/adr/0020-artifact-manifest-v2-work-id-resolution.md` — **new**.
+
+Tests (+93):
+
+- `packages/recommender/tests/test_artifact_numeric.py` (17) — **new**.
+- `packages/recommender/tests/test_artifact_mapping.py` (13) — **new**.
+- `packages/recommender/tests/test_artifact_families.py` (25) — **new**.
+- `packages/recommender/tests/test_artifacts.py` — rewritten (21).
+- `packages/recommender/tests/test_package_boundaries.py` — +1, no
+  training-only runtime dependency.
+- `apps/api/tests/test_dependency_boundaries.py` (2) — **new**.
+- `tests/integration/test_build_source_similarity.py` (9) — **new**.
+- `tests/integration/test_build_item_metadata.py` (7) — **new**.
+- `tests/integration/test_recommendation_wiring.py` — +3 real-artifact
+  tests, including the reimport regression.
+- `tests/integration/test_build_popularity.py` — updated for the new format,
+  +1 stale-file test.
+
+No migration, no OpenAPI change, no frontend change: R3 touches no schema,
+no route and nothing under `apps/web`.
+
+### Phases R4-R9 — not started
 
 Scope, tasks and per-phase acceptance criteria live in
 `RECOMMENDER_IMPLEMENTATION_PLAN.md` and are not duplicated here. Each phase
-appends its own record to this section as it lands, in the same shape as R0
-and R1/R2 above: checklist, drift found, decisions/ADRs, changed files,
+appends its own record to this section as it lands, in the same shape as
+R0-R3 above: checklist, drift found, decisions/ADRs, changed files,
 commands run with real results, and unresolved risks appended to §6.
 
 Standing constraints for every recommender phase (from `CLAUDE.md` and
@@ -2206,6 +2418,155 @@ only in unit tests. Server logs clean throughout: `{200: 9, 201: 3,
 E2E was **not** re-run this phase: R2 changes no route the critical flow
 exercises and no frontend code at all (the onboarding UI is R8 scope), so
 it has nothing new to cover. Last verified green in §5j.
+
+## 5l. Recommender Phase R3 validation commands and results
+
+```bash
+# Dependency resolution — risk #81's open unknown, probed BEFORE committing
+# anything to a manifest, resolution-only (metadata, no wheel downloads):
+uv pip compile --python-version 3.12 <probe: numpy scipy scikit-learn \
+                                            implicit sentence-transformers>
+# Resolved in 1.2s on darwin/arm64, uv 0.10.4. See §6 risk #81 for versions.
+
+# What R3 actually added (NumPy only) — the lock already carried it via
+# pandas/pyarrow, so nothing new entered the resolution:
+uv sync --all-packages          # Resolved 60 packages in 1.30s
+
+make test
+# apps/api             145 passed   (was 143 — +2 dependency-boundary)
+# packages/recommender 111 passed   (was  38 — +73 artifact substrate)
+# apps/web              93 passed   (unchanged — no frontend work)
+make lint                        # clean, all four targets
+make typecheck                   # clean: 125 + 37 source files, apps/web
+uv run --project apps/api pytest tests/integration -q
+#                      181 passed  (was 161 — +20 builder/wiring tests)
+
+# tests/integration/ formatting via the exact repo-root invocation make lint
+# uses (88-char default, not apps/api's 100 — risk #35):
+uv run --project apps/api ruff format tests
+```
+
+No migration (no schema change), no `make generate-api-client` (no OpenAPI
+change), no e2e (no route and no frontend code touched — last green §5j).
+
+**Regression verified against unfixed code**, per the working method used
+since Phase 3. The phase's central claim is that artifacts resolve through
+`work_id`, not the stored `book_id`:
+
+```bash
+# Sabotage: make resolve_item_mapping return the build-time book_id.
+uv run --project apps/api pytest tests/integration/test_recommendation_wiring.py
+# 1 failed, 6 passed
+#   test_a_reimport_that_reassigns_book_ids_still_serves_the_right_books
+# Fix restored:
+# 7 passed
+```
+
+**Live smoke test** against the real dev database (92,524 active books).
+
+First, degradation, *before* rebuilding anything — the pre-R3 8.9 MB v1
+artifact was still on disk:
+
+```text
+warning  popularity_artifact_unavailable
+         error="unreadable manifest at 'popularity/latest': 2 validation
+         errors for ArtifactManifest — preprocessing_version Field required;
+         files.0 Input should be an object"
+provider built in 0.40s -> InProcessProvider, ranking size 0
+```
+
+No crash, no startup failure, and the log names the fix. Then the rebuild:
+
+```bash
+make build-recommender-artifacts        # 2.9s wall, all three families
+```
+
+```text
+popularity:        92524 items
+source_similarity: 92524 items
+    edges_exported 269276   edges_in_database 269276
+    dropped_out_of_catalog 0   dropped_self_edges 0
+    books_with_neighbors 54552   sources goodreads
+item_metadata:     92524 items
+    distinct_genres 10   items_without_genre 3098   items_without_author 2322
+    tags_version: unset (R5)
+```
+
+rec-spec §14 asks the build to re-validate the import's resolution invariant
+rather than assume it. It holds exactly: every one of the 269,276 edges
+resolves to an active catalog book.
+
+Artifacts on disk and the rows they registered — asserted on persisted
+state, not on exit codes:
+
+```text
+data/artifacts/popularity/latest/         manifest 4K  mapping 680K  scores 320K
+data/artifacts/source_similarity/latest/  manifest 4K  mapping 504K  graph  912K
+data/artifacts/item_metadata/latest/      manifest 4K  mapping 504K  items  2.1M
+
+model_name        | model_version    | status  | manifest_bytes
+------------------+------------------+---------+----------------
+item_metadata     | 20260813T114431Z | ACTIVE  |            755
+source_similarity | 20260813T114430Z | ACTIVE  |            793
+popularity        | 20260813T114630Z | ACTIVE  |            711
+popularity        | 20260805T093634Z | RETIRED |        1555987   <- v1
+```
+
+Loading all three through the real loaders against the real catalog:
+
+```text
+catalog snapshot   0.14s   92524 works
+popularity         0.28s   ok  resolved=92524  unresolved=0  reassigned=0
+source_similarity  0.46s   ok  resolved=92524
+item_metadata      1.07s   ok  resolved=92524
+all three loaded:  77 MB resident, 89 MB peak
+checksum verify (item_metadata, 2.6 MB): 0.003s
+neighbours(#1) in 37us, joined against item metadata:
+  #11339 rank=4 goodreads 'Home: A Short History of an Idea' — Witold Rybczynski
+  #59534 rank=5 goodreads 'Love Bites (Argeneau #2)' — Lynsay Sands
+  #42290 rank=7 goodreads 'Not So Big House' — Sarah Susanka
+  seed #1 'A Field Guide to American Houses' — Virginia McAlester [non-fiction]
+```
+
+(The romance novel among the architecture books is Goodreads' own noise, not
+an export bug — rec-spec §14 says export what the source says and keep the
+generator semantically pure. Worth knowing before R6 weights this source.)
+
+Finally the whole chain through real HTTP, `RECOMMENDATION_PROVIDER=popularity`:
+
+```text
+POST /auth/register -> 201
+POST /auth/login    -> 200
+GET  /recommendations/home?limit=10 -> 200
+
+startup log: popularity_artifact_loaded status=ok item_count=92524
+             resolved_count=92524 unresolved_count=0 reassigned_count=0
+             model_version=20260813T114630Z
+
+rank 0 #3123  'Toda Mafalda'                          POPULAR_WITH_READERS
+rank 1 #43447 "It's a Magical World: A Calvin and…"   POPULAR_WITH_READERS
+rank 2 #24343 "There's Treasure Everywhere: A Calvin…" POPULAR_WITH_READERS
+```
+
+Identical to the builder's own top-of-ranking preview, which is the point:
+PostgreSQL → builder → `mapping.npz`/`scores.npz` → recommender-package
+loader → `wiring.py` (which no longer knows either format) → engine → HTTP,
+with order preserved end to end. Persisted rows for that request:
+
+```text
+model_name | model_version    | surface | results | impressions
+-----------+------------------+---------+---------+------------
+popularity | 20260813T114630Z | home    |     600 |          10
+
+position | book_id | reason_code            <- matches the served order
+       0 |    3123 | POPULAR_WITH_READERS
+       1 |   43447 | POPULAR_WITH_READERS
+```
+
+`model_version` on the persisted request matches the ACTIVE `model_versions`
+row, so the batch is attributable to the exact artifact that produced it.
+Server logs clean: `{200: 3, 201: 1}` plus the 422/401 from two deliberately
+malformed probe requests, no error-level entries, no tracebacks.
 
 ## 6. Risks and assumptions
 
@@ -3030,24 +3391,26 @@ conservative, reversible default and document it."
     untrustworthy *and* a real user-facing failure exists until R1's first
     task lands. This is the strongest argument for R1 being next and not
     being skipped or reordered.
-80. **`ArtifactManifest.item_mapping` may not scale to five artifact
-    families.** It is a `tuple[ArtifactItemMapping, ...]` — one frozen
-    Pydantic model per catalog item. At ~92k items that is one large object
-    graph per artifact, constructed at provider build time. It is fine
-    today with a single popularity artifact and was never a problem worth
-    solving before now. R3 should measure real load time and memory with
-    several artifacts loaded rather than assume it is either fine or
-    broken; ADR-0014's "compact numerical arrays over object graphs"
-    principle points at parallel `.npy` id arrays if measurement says so.
-81. **The heavy offline ML dependencies have not been added yet, and the
-    workspace has never resolved them.** No NumPy, SciPy, `implicit`,
-    scikit-learn or `sentence-transformers` exists in any manifest, so it
-    is not yet known whether the transformer stack resolves cleanly in
-    this uv workspace on this platform, nor how long an embedding build
-    over 92,526 books actually takes here. R3-R5 carry that unknown. The
-    lock file must not be hand-edited (CLAUDE.md), and training-only
-    dependencies must land in a group the API runtime does not install
-    (ADR-0018).
+80. ~~**`ArtifactManifest.item_mapping` may not scale to five artifact
+    families.**~~ **Closed in R3 — measured, and it did not scale.** 8.9 MB
+    of JSON, 0.22 s of parse time and ~55 MB of resident objects per family
+    per worker, plus a 1.56 MB `model_versions.manifest` row. Replaced by a
+    504 KB `mapping.npz`; three families now load in 1.8 s / 77 MB
+    *including every payload*. ADR-0020, §3R "Drift items closed".
+81. **The heavy offline ML dependencies are still not in any manifest, but
+    the resolution unknown is closed.** Probed in R3 before committing
+    anything, resolution-only (`uv pip compile`, no wheel downloads): the
+    full stack resolves cleanly in 1.2 s on darwin/arm64 with uv 0.10.4 —
+    `numpy 2.5.2`, `scipy 1.18.0`, `scikit-learn 1.9.0`, `implicit 0.7.3`,
+    `sentence-transformers 5.7.0`, pulling `torch 2.13.0` and
+    `transformers 5.15.0`. Only NumPy was actually added (R3 needs nothing
+    heavier, and it was already in the lock via pandas/pyarrow).
+    **What remains unknown is cost, not feasibility:** wheel download and
+    install size for the torch stack, and how long an embedding build over
+    92,524 books takes on this hardware. R4/R5 carry that. The lock file
+    must not be hand-edited (CLAUDE.md), and the training-only group must
+    be one the API runtime does not install (ADR-0018) — two tests now fail
+    if the encoder stack reaches either runtime dependency set.
 
 ### Recommender Phase R1
 
@@ -3127,27 +3490,80 @@ conservative, reversible default and document it."
     scope and would alter shipped behavior — flagged here rather than
     silently decided.
 
+### Recommender Phase R3
+
+93. **The 10% unresolved-items rejection threshold is a judgement, not a
+    measurement.** `DEFAULT_MAX_UNRESOLVED_FRACTION` draws the line between
+    "normal catalog attrition, drop and serve" and "these describe different
+    worlds, do not serve". No real operational state has ever approached it
+    — the live catalog resolves 92,524/92,524 — so the number is reasoned,
+    not observed. It is a named constant with the reasoning attached, and it
+    is the first thing to revisit if a legitimate rebuild ever trips it.
+94. **Most of the 77 MB per worker is Python strings, not matrices.** The
+    item-metadata table decodes 92,524 titles and authors into tuples at
+    load (34 MB of the total, and the 1.07 s that makes it the slowest
+    family to load). The numeric artifacts are cheap by comparison. If
+    per-worker memory becomes the binding constraint on deployment density
+    — ADR-0014 says it directly bounds worker count — decoding strings
+    lazily is the lever. Deliberately not pre-optimized: R9 is where
+    profiling decides, and three families is not yet five.
+95. **Artifact freshness has no monitoring, only correctness.** A stale
+    artifact now degrades safely and logs its counts, but nothing warns
+    that `make import-data` has run since the last artifact build. Books
+    added after a build are simply invisible to candidates, silently and
+    indefinitely. The information needed is already recorded (the manifest
+    and the `model_versions` row both carry `catalog_version`); nothing
+    compares them outside the loader's own startup log.
+96. **The source-similarity graph inherits Goodreads' noise verbatim, by
+    design.** Spot-checking neighbours of a real architecture book returned
+    two architecture books and a paranormal romance. rec-spec §14 requires
+    this generator stay semantically pure — export what the source says,
+    never quietly mix in same-author or same-genre heuristics — so the noise
+    is not a bug to fix here. It is a reason to treat this source's
+    precision as unmeasured when R6 assigns it an RRF weight, and R9's
+    content/source evaluation (rec-spec §23.2) is where it gets a number.
+97. **`interactions.parquet` is still read by nothing.** Drift item 13
+    remains open, unchanged since R0: 775,090 historical rows present since
+    Phase 2, deliberately never imported into PostgreSQL because historical
+    integer users are not application users. R4 is its first consumer, and
+    the mapping validator R3 built is what will drop and report the rows
+    that do not resolve to catalog items.
+
 ## 7. Next phase
 
-**Recommender Phase R3 — artifact substrate, data validation and
-source-similarity export.** Scope and acceptance criteria are in
-`RECOMMENDER_IMPLEMENTATION_PLAN.md`; the live gaps it consumes are
-recorded at §3R "Drift and gaps found" items 10 (popularity artifact
-parsing still inline in `wiring.py`), 11 (269,276 source-similarity edges
-are PostgreSQL-only, unusable without a DB read during inference), 12 (no
-numerical/ML dependencies in the workspace at all) and 15
-(`ArtifactManifest.item_mapping` unmeasured at multi-family scale).
-ADR-0014 governs the artifact runtime boundary.
+**Recommender Phase R4 — collaborative-filtering artifacts: ALS and
+item-item.** Scope and acceptance criteria are in
+`RECOMMENDER_IMPLEMENTATION_PLAN.md`. It is the first consumer of
+`data/processed/interactions.parquet` (drift item 13, the last one open),
+and the first phase to train anything.
 
-R3 is the first phase that adds heavy dependencies to the uv workspace and
-the first to be blocked by a genuine unknown — whether the transformer
-stack resolves cleanly on this platform (risk #81) — though the encoder
-itself is R5's problem, not R3's.
+What R3 leaves it, so it does not have to be rebuilt:
 
-R3 has not been started. Do not begin it as part of an R2 pass.
+- `write_artifact` / `load_artifact_bundle` — a new family is a module
+  under `book_recommender/artifacts/` plus an entry in
+  `book_recommender.config.FAMILIES`; no application wiring learns a file
+  format (ADR-0014, ADR-0020).
+- `save_array` with `mmap` for the factor matrices, which are the first
+  payloads large enough to want it.
+- The mapping validator R4's shared interaction transform needs directly:
+  `work_id` resolves to catalog items, unresolved rows are dropped **and
+  counted**, and no user identity exists in the artifact contract at all —
+  which is the structural half of rec-spec §7.2's rule that historical
+  Book-Crossing integers are not application UUID users.
+- Determinism and checksums, so "neighbour artifacts deterministic for
+  fixed config" is asserted the same way the R3 builders assert it.
 
-Drift-item ledger: R1 closed items 4-8 and 14; R2 closed item 9. Items
-10-13 and 15 remain, spread across R3-R5.
+What R4 must decide that R3 deliberately did not: where training-only
+dependencies live. A non-default uv dependency group is the intended shape
+(ADR-0018); R3 added no such dependency, so it created a guard rather than
+an empty group. Resolution is known to work (risk #81); download and build
+*cost* on this platform is not.
+
+R4 has not been started. Do not begin it as part of an R3 pass.
+
+Drift-item ledger: R1 closed items 4-8 and 14; R2 closed item 9; R3 closed
+items 10, 11, 12 and 15. **Only item 13 remains** —
+`interactions.parquet` has no consumer — and R4 is it.
 
 ### The application sequence is complete
 

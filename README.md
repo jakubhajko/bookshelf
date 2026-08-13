@@ -87,7 +87,10 @@ make migrate                 apply Alembic migrations
 make import-data[-dry-run]   import books.parquet into PostgreSQL
 make cleanup-sessions        delete expired/revoked auth sessions
 make seed-demo               create the demo_reader account with representative shelves/ratings
+make build-recommender-artifacts  build every recommender artifact (see below)
 make build-popularity        build the popularity recommendation artifact
+make build-source-similarity export resolved Goodreads similarity edges
+make build-item-metadata     build the compact item-metadata artifact
 make e2e                     Playwright critical-flow tests (spec §13.5) — needs a running, migrated API
 make generate-api-client     frontend client from the OpenAPI schema
 ```

@@ -1,30 +1,31 @@
-"""CLI: build the popularity recommendation artifact (spec §10.12, §11).
+"""CLI: build the popularity recommendation artifact (rec-spec §15).
 
     uv run --project apps/api python -m book_app.cli.build_popularity [options]
 
 or via ``make build-popularity``. Computes a Bayesian-shrunk popularity
 score per active book from ``ratings_count``/``bx_ratings``/``bx_explicit``
-(support) and ``average_rating`` (quality): "support adjustment" (spec
-§10.12) pulls a book's score toward the catalog-wide mean when it has few
-ratings, so two five-star reviews don't outrank thousands averaging 4.5.
-``bx_explicit`` is a verified subset of ``bx_ratings`` (every active row has
-``bx_explicit <= bx_ratings``) — counting it a second time in ``support`` is
-a deliberate choice to weight explicit engagement more heavily, not a
-double-counting bug. A fallback and baseline (spec §10.12), not a real
-recommender.
+(support) and ``average_rating`` (quality): "support adjustment" pulls a
+book's score toward the catalog-wide mean when it has few ratings, so two
+five-star reviews don't outrank thousands averaging 4.5. ``bx_explicit`` is
+a verified subset of ``bx_ratings`` (every active row has ``bx_explicit <=
+bx_ratings``) — counting it a second time in ``support`` is a deliberate
+choice to weight explicit engagement more heavily, not a double-counting
+bug. A fallback and baseline (rec-spec §15), not a real recommender.
+
+Recommender Phase R3 moved the file writing to
+``book_recommender.artifacts.write_artifact``: scores are a ``float64``
+column in ``scores.npz`` and the item mapping is a compact ``mapping.npz``,
+where both used to be JSON with one object per catalog item.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
-from book_recommender.artifacts import ArtifactItemMapping, ArtifactManifest, LocalArtifactStorage
+from book_recommender.artifacts import LocalArtifactStorage, write_artifact, write_popularity_scores
+from book_recommender.config import POPULARITY
 from sqlalchemy import Float, select
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session, sessionmaker
@@ -34,13 +35,13 @@ from book_app.core.database import create_db_engine, create_session_factory
 from book_app.core.logging import configure_logging, get_logger
 from book_app.modules.books import repository as books_repository
 from book_app.modules.books.models import Book
-from book_app.modules.recommendations import repository as recommendations_repository
-from book_app.modules.recommendations.artifact_paths import (
-    POPULARITY_ARTIFACT_DIR,
-    POPULARITY_MODEL_NAME,
-    resolve_artifact_root,
+from book_app.modules.recommendations.artifact_build import (
+    ArtifactBuildReport,
+    new_model_version,
+    register_model_version,
 )
-from book_app.shared.enums import CatalogStatus, ModelVersionStatus
+from book_app.modules.recommendations.artifact_paths import resolve_artifact_root
+from book_app.shared.enums import CatalogStatus
 
 logger = get_logger("book_app.cli.build_popularity")
 
@@ -77,76 +78,56 @@ def compute_popularity_ranking(
     return [(row.id, row.work_id, float(row.score)) for row in session.execute(stmt)]
 
 
-@dataclass
-class BuildReport:
-    item_count: int
-    model_version: str
-    catalog_version: str
-    dry_run: bool
-    top_preview: list[dict[str, Any]]
-
-
 def run_build(
     session_factory: sessionmaker[Session],
     *,
     artifact_root: Path,
     prior_strength: float = DEFAULT_PRIOR_STRENGTH,
     dry_run: bool = False,
-) -> BuildReport:
+) -> ArtifactBuildReport:
     with session_factory() as session:
         ranking = compute_popularity_ranking(session, prior_strength=prior_strength)
         catalog_version = books_repository.get_catalog_version(session)
-        model_version = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        model_version = new_model_version()
         top_preview = [
             {"book_id": book_id, "work_id": work_id, "score": round(score, 4)}
             for book_id, work_id, score in ranking[:PREVIEW_SIZE]
         ]
 
         if dry_run or not ranking:
-            return BuildReport(
-                item_count=len(ranking),
+            return ArtifactBuildReport(
+                model_name=POPULARITY.name,
                 model_version=model_version,
                 catalog_version=catalog_version,
+                item_count=len(ranking),
                 dry_run=dry_run,
-                top_preview=top_preview,
+                stats={"prior_strength": str(prior_strength)},
+                preview=top_preview,
             )
 
-        manifest = ArtifactManifest(
-            model_name=POPULARITY_MODEL_NAME,
+        scores = [score for _, _, score in ranking]
+        written = write_artifact(
+            LocalArtifactStorage(artifact_root),
+            POPULARITY,
             model_version=model_version,
             catalog_version=catalog_version,
-            trained_at=datetime.now(UTC),
-            item_count=len(ranking),
-            item_mapping=tuple(
-                ArtifactItemMapping(book_id=book_id, work_id=work_id, model_item_index=index)
-                for index, (book_id, work_id, _) in enumerate(ranking)
-            ),
-            files=("scores.json",),
+            items=[(book_id, work_id) for book_id, work_id, _ in ranking],
+            payloads={"scores.npz": lambda path: write_popularity_scores(path, scores)},
+            config={"prior_strength": prior_strength},
         )
-        storage = LocalArtifactStorage(artifact_root)
-        storage.save_manifest(POPULARITY_ARTIFACT_DIR, manifest)
-        scores_path = storage.resolve(POPULARITY_ARTIFACT_DIR, "scores.json")
-        scores_path.write_text(json.dumps({"scores": [score for _, _, score in ranking]}))
-
-        recommendations_repository.retire_active_versions(session, model_name=POPULARITY_MODEL_NAME)
-        recommendations_repository.create_model_version(
-            session,
-            model_name=POPULARITY_MODEL_NAME,
-            model_version=model_version,
-            catalog_version=catalog_version,
-            provider_name="in_process",
-            status=ModelVersionStatus.ACTIVE,
-            manifest=manifest.model_dump(mode="json"),
-            activated_at=datetime.now(UTC),
-        )
+        register_model_version(session, POPULARITY, written)
         session.commit()
 
-        return BuildReport(
-            item_count=len(ranking),
+        return ArtifactBuildReport(
+            model_name=POPULARITY.name,
             model_version=model_version,
             catalog_version=catalog_version,
+            item_count=len(ranking),
             dry_run=False,
-            top_preview=top_preview,
+            checksums=written.checksums,
+            stale_files=written.stale_files,
+            stats={"prior_strength": str(prior_strength)},
+            preview=top_preview,
         )
 
 
@@ -181,12 +162,10 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         engine.dispose()
 
-    mode = "[DRY RUN] " if report.dry_run else ""
-    print(
-        f"{mode}build_popularity: {report.item_count} books ranked, "
-        f"model_version={report.model_version}, catalog_version={report.catalog_version}"
-    )
-    for row in report.top_preview:
+    print(report.summary_line())
+    for line in report.warning_lines():
+        print(line)
+    for row in report.preview:
         print(f"  #{row['book_id']} ({row['work_id']}): {row['score']}")
 
     logger.info(

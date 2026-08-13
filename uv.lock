@@ -158,6 +158,7 @@ dependencies = [
     { name = "argon2-cffi" },
     { name = "book-recommender-engine" },
     { name = "fastapi" },
+    { name = "numpy" },
     { name = "pandas" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pyarrow" },
@@ -185,6 +186,7 @@ requires-dist = [
     { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "book-recommender-engine", editable = "packages/recommender" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "numpy", specifier = ">=2.0" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pyarrow", specifier = ">=17.0" },
@@ -211,6 +213,7 @@ name = "book-recommender-engine"
 version = "0.1.0"
 source = { editable = "packages/recommender" }
 dependencies = [
+    { name = "numpy" },
     { name = "pydantic" },
 ]
 
@@ -222,7 +225,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.9" }]
+requires-dist = [
+    { name = "numpy", specifier = ">=2.0" },
+    { name = "pydantic", specifier = ">=2.9" },
+]
 
 [package.metadata.requires-dev]
 dev = [

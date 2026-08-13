@@ -5,6 +5,11 @@ description = "Typed recommendation engine/provider package — no FastAPI or OR
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.9",
+    # Runtime numeric artifact loading only (rec-spec §25, ADR-0014): this
+    # package reads compact .npy/.npz matrices, it never trains anything.
+    # Training-only heaviness (implicit / sentence-transformers / scikit-learn)
+    # must never appear here — see ADR-0018.
+    "numpy>=2.0",
 ]
 
 [dependency-groups]

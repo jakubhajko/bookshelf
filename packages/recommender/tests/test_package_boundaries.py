@@ -13,6 +13,22 @@ from pathlib import Path
 
 FORBIDDEN_DEPENDENCY_PREFIXES = ("fastapi", "starlette", "sqlalchemy", "alembic", "psycopg")
 
+#: ADR-0018: the API loads matrices, never models. Training-only heaviness
+#: (the text encoder above all) must not reach the runtime dependency set,
+#: because every API worker would then import a transformer stack it never
+#: uses. NumPy is deliberately *not* here — reading a ``.npy`` at serving time
+#: is the whole point of ADR-0014's artifact runtime.
+FORBIDDEN_TRAINING_DEPENDENCY_PREFIXES = (
+    "torch",
+    "transformers",
+    "sentence-transformers",
+    "implicit",
+    "scikit-learn",
+    "sklearn",
+    "datasets",
+    "accelerate",
+)
+
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -24,6 +40,17 @@ def test_pyproject_declares_no_forbidden_dependencies() -> None:
         assert not name.startswith(FORBIDDEN_DEPENDENCY_PREFIXES), (
             f"packages/recommender must not depend on {dependency!r} "
             "(see docs/adr/0006-recommender-provider-boundary.md)"
+        )
+
+
+def test_pyproject_declares_no_training_only_dependencies() -> None:
+    pyproject = tomllib.loads((PACKAGE_ROOT / "pyproject.toml").read_text())
+    declared = pyproject["project"].get("dependencies", [])
+    for dependency in declared:
+        name = dependency.lower()
+        assert not name.startswith(FORBIDDEN_TRAINING_DEPENDENCY_PREFIXES), (
+            f"packages/recommender must not depend on {dependency!r} at runtime "
+            "(see docs/adr/0018-offline-swappable-text-embeddings.md)"
         )
 
 

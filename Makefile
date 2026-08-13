@@ -9,6 +9,7 @@ LOCAL_PGHOST := localhost
 .PHONY: help setup dev dev-api dev-web up down logs \
         db-start db-stop db-shell \
         migrate import-data import-data-dry-run seed-demo build-popularity \
+        build-source-similarity build-item-metadata build-recommender-artifacts \
         test lint typecheck e2e generate-api-client
 
 help: ## Show this help
@@ -83,6 +84,15 @@ seed-demo: ## Create the local demo user with representative shelves/ratings/sav
 
 build-popularity: ## Build the popularity recommendation artifact
 	cd apps/api && uv run python -m book_app.cli.build_popularity
+
+build-source-similarity: ## Export resolved Goodreads similarity edges to an artifact
+	cd apps/api && uv run python -m book_app.cli.build_source_similarity
+
+build-item-metadata: ## Build the compact item-metadata artifact (title/author/genre)
+	cd apps/api && uv run python -m book_app.cli.build_item_metadata
+
+build-recommender-artifacts: build-popularity build-source-similarity build-item-metadata ## Build every recommender artifact currently implemented
+	@echo "Recommender artifacts rebuilt. Note: 'make import-data' invalidates them (see ADR-0014)."
 
 ## --- Quality gates -----------------------------------------------------------
 

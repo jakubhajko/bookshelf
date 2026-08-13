@@ -81,9 +81,28 @@ uv run --project apps/api python scripts/data_import/build_sample_fixture.py
 
 ## `artifacts/`
 
-Empty placeholder for generated model artifacts (spec §10.13 — popularity
-provider output starting Phase 5, later the future pipeline). Gitignored
-except for `.gitkeep`: everything here is regeneratable via CLI (eventually
-`make build-popularity`), never hand-edited or committed. This is the default
-`artifact_storage_local_path` in `Settings` (`core/config.py`) and the
-read-only mount target for the `api` service in `docker-compose.yml`.
+Generated model artifacts (rec-spec §8, ADR-0014/ADR-0020), one directory
+per family:
+
+```text
+artifacts/
+  popularity/latest/         manifest.json  mapping.npz  scores.npz
+  source_similarity/latest/  manifest.json  mapping.npz  graph.npz
+  item_metadata/latest/      manifest.json  mapping.npz  items.npz
+```
+
+`als/`, `item_cf/` and `content/` join them in recommender phases R4-R5.
+
+Gitignored except for `.gitkeep`: everything here is regeneratable via
+`make build-recommender-artifacts` (or the per-family targets), never
+hand-edited or committed. About 6.7 MB for the current 92,524-book catalog.
+This is the default `artifact_storage_local_path` in `Settings`
+(`core/config.py`) and the read-only mount target for the `api` service in
+`docker-compose.yml`.
+
+Every artifact is `work_id`-keyed and re-resolved against the live catalog
+at load, so **`make import-data` does not corrupt them** — books added since
+the build are simply absent from candidates, and removed ones are dropped
+with a logged count. Rebuild after a re-import for freshness, not for
+safety. A manifest written before R3 (schema version 1) is rejected as
+unreadable and degrades to the popularity fallback; rebuild it.

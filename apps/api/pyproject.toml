@@ -14,6 +14,11 @@ dependencies = [
     "alembic>=1.13",
     "pandas>=2.2",
     "pyarrow>=17.0",
+    # Offline artifact builders assemble the numeric payloads the recommender
+    # package loads at runtime. Already present transitively via
+    # book-recommender-engine; declared explicitly because this package
+    # imports it directly (see cli/build_source_similarity.py).
+    "numpy>=2.0",
     "argon2-cffi>=23.1",
     "pyjwt>=2.9",
     "book-recommender-engine",

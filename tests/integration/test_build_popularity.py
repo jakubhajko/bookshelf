@@ -96,7 +96,7 @@ def test_high_support_high_rating_book_outranks_low_support_perfect_book(
     report = run_build(test_session_factory, artifact_root=tmp_path)
     assert report.item_count == 22
 
-    ranked_ids = [row["book_id"] for row in report.top_preview]
+    ranked_ids = [row["book_id"] for row in report.preview]
     trusted_rank = ranked_ids.index(trusted)
     lucky_rank = ranked_ids.index(lucky) if lucky in ranked_ids else len(ranked_ids)
     assert trusted_rank < lucky_rank
@@ -115,10 +115,11 @@ def test_run_build_writes_artifact_and_activates_model_version(
     report = run_build(test_session_factory, artifact_root=tmp_path)
     assert report.dry_run is False
 
-    manifest_path = tmp_path / "popularity" / "latest" / "manifest.json"
-    scores_path = tmp_path / "popularity" / "latest" / "scores.json"
-    assert manifest_path.is_file()
-    assert scores_path.is_file()
+    artifact_dir = tmp_path / "popularity" / "latest"
+    assert (artifact_dir / "manifest.json").is_file()
+    assert (artifact_dir / "scores.npz").is_file()
+    assert (artifact_dir / "mapping.npz").is_file()
+    assert report.stale_files == ()
 
     with test_engine.connect() as conn:
         row = conn.execute(
@@ -146,9 +147,29 @@ def test_rebuilding_retires_the_previous_active_version(
     assert [r.status for r in rows] == ["RETIRED", "ACTIVE"]
 
 
+def test_a_previous_formats_payload_is_reported_as_stale_not_deleted(
+    test_session_factory: sessionmaker[Session], test_engine: Engine, tmp_path: Path
+) -> None:
+    """The pre-R3 popularity artifact wrote ``scores.json``. Rebuilding leaves
+    it on disk — inert, since the loader reads only what the manifest declares
+    — and the build says so rather than deleting a file it does not own."""
+    _insert_scored_book(
+        test_engine, work_id="w1", title="A", ratings_count=10, average_rating=4.0
+    )
+    leftover = tmp_path / "popularity" / "latest" / "scores.json"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text('{"scores": [1.0]}')
+
+    report = run_build(test_session_factory, artifact_root=tmp_path)
+
+    assert report.stale_files == ("scores.json",)
+    assert leftover.is_file()
+    assert report.warning_lines()
+
+
 def test_no_active_books_produces_an_empty_report(
     test_session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
     report = run_build(test_session_factory, artifact_root=tmp_path)
     assert report.item_count == 0
-    assert report.top_preview == []
+    assert report.preview == []

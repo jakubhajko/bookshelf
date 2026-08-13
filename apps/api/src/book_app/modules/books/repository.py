@@ -306,6 +306,22 @@ def get_catalog_version(session: Session) -> str:
     return f"{count}:{max_updated_at.isoformat() if max_updated_at else 'none'}"
 
 
+def get_active_catalog_identities(session: Session) -> list[tuple[int, str]]:
+    """``(book_id, work_id)`` for every active book, ordered by ``book_id``.
+
+    Read once at provider-construction time so artifacts can re-resolve their
+    durable ``work_id``s to the ``book_id``s this database is currently using
+    (ADR-0014). That is a startup query, not an inference-time one — the
+    engine itself still never touches PostgreSQL (ADR-0007).
+    """
+    stmt = (
+        select(Book.id, Book.work_id)
+        .where(Book.catalog_status == CatalogStatus.ACTIVE)
+        .order_by(Book.id)
+    )
+    return [(row.id, row.work_id) for row in session.execute(stmt)]
+
+
 def get_active_book_ids(session: Session, *, limit: int) -> list[int]:
     """Real, active book_ids for the mock engine's candidate pool — it has
     no database access of its own (spec §10.1), so the application supplies
