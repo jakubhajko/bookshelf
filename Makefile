@@ -103,7 +103,7 @@ build-als: ## Train and export the ALS artifact (needs 'make setup-training')
 build-item-cf: ## Build the item-item CF artifact (needs 'make setup-training')
 	cd apps/api && uv run --group training python -m book_app.cli.build_item_cf --sweep
 
-build-content: ## Build content embeddings (needs 'make setup-training'; ~88 min for 92k books)
+build-content: ## Build content embeddings (needs 'make setup-training'; ~96 min for 92k books)
 	cd apps/api && uv run --group training python -m book_app.cli.build_content_embeddings --progress
 
 evaluate-content: ## Evaluate content embeddings against Goodreads edges + coherence (rec-spec §23.2)

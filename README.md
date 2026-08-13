@@ -94,7 +94,7 @@ make build-source-similarity export resolved Goodreads similarity edges
 make build-item-metadata     build the compact item-metadata artifact
 make build-als               train + export ALS (needs setup-training)
 make build-item-cf           build item-item CF (needs setup-training)
-make build-content           build content embeddings (needs setup-training; ~88 min)
+make build-content           build content embeddings (needs setup-training; ~96 min)
 make inspect-recommender-profile USERNAME=<name> [ARGS=--json]  inspect a reader's interests
 make e2e                     Playwright critical-flow tests (spec §13.5) — needs a running, migrated API
 make generate-api-client     frontend client from the OpenAPI schema

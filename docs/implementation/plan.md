@@ -1913,7 +1913,8 @@ consumes what this phase produced.
 - [x] `make inspect-recommender-profile USERNAME=<name>` (+ `--json`),
   calling the same profiling code as serving.
 - [x] Item-metadata tag columns filled — the contract R3 wrote empty.
-- [x] Full gates green; live build over the real 92,524-book catalog.
+- [x] Full gates green; live build over the real 92,524-book catalog, with
+  the live smoke test, evaluation and memory measurements in §5n.
 
 #### The decision that shaped the phase
 
@@ -1948,7 +1949,20 @@ Matching is on **whole tokens, never substrings** — `own` must reject
 | bookkeeping phrase (`to-read`, `series`, …) | 27,954 |
 | challenge list (`1001-books-to-read-before-you-die`) | 25,002 |
 | too short / numeric | 24,199 |
-| **total rejected** | **332,962 (19.6%)** |
+| **rejected by a rule** | **332,962 (19.6%)** |
+
+**Correcting this table's own earlier framing**, which called that last row
+"total rejected". It is the total rejected *by the cleaning rules*, and it
+is not the total attrition. The full build reports 1,699,225 raw links and
+1,029,729 kept, so 669,496 links (39.4%) do not survive. The other 336,534
+are dropped by `clean_tags`'s de-duplication and its
+`MAX_TAGS_PER_BOOK = 12` cap, which `break`s without recording a rejection
+reason — and the cap is the dominant filter, not the blocklist: **82.4% of
+books (76,222) hit it.** Since the builder feeds tags in support order, the
+cap keeps the twelve best-attested per book, which is what it is for. The
+distinction matters for risk #104: the blocklist's reach over the long tail
+is smaller than a 19.6% headline suggests, because most links never reach
+it.
 
 What survives is recognisably thematic. A real example from the build:
 
@@ -1979,6 +1993,14 @@ percentile ~1,519; 512 tokens covers the corpus.
 512/16 shipped: the 256-token variant is barely faster and truncates the
 90th-percentile description. The model download is a one-time ~1.2 GB;
 `--limit` exists for development.
+
+**The full run came in slower than this table projected**: 16.1 books/s
+sustained over 92,524 books, 5,740s = **95.7 minutes** against the
+predicted 88 (§5n). The benchmark above was measured on a short sample and
+did not capture thermal throttling and the description-length tail across
+the whole catalog. The ranking between configurations is still the reason
+512/16 was chosen; the absolute number is 9% optimistic, and 95 minutes is
+what to budget for a rebuild.
 
 #### Two corrections this phase made to its own earlier work
 
@@ -3044,6 +3066,208 @@ model_versions: all five families ACTIVE, manifests 711-832 bytes each
 E2E was **not** re-run: R4 changes no route, no schema and no frontend code.
 Last verified green in §5j.
 
+## 5n. Recommender Phase R5 validation commands and results
+
+### The real embedding build
+
+```bash
+make setup-training
+make build-content     # no --limit: the full catalog
+```
+
+```text
+content: 92524 items, model_version=20260813T173621Z
+catalog_version=92524:2026-08-05T11:35:44.375185+02:00
+  books                92,524     with_description  81,383
+  with_genres          89,426     with_tags         92,023
+  raw_tag_links     1,699,225     kept_tag_links 1,029,729
+  read_seconds             8.4
+  device                   mps    encoder  Qwen/Qwen3-Embedding-0.6B
+  dimension                512    revision 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
+  encode_seconds        5,740.4   books_per_second      16.1
+```
+
+Started 17:36:21Z, finished 19:12:19Z — **95.7 minutes**, not the 88 the
+pre-build benchmark projected. See the correction in §3R: the sustained
+full-catalog rate is 16.1 books/s against 17.6 measured on a short sample.
+
+```text
+data/artifacts/  271 MB total (was 88 MB)
+  content/latest/  embeddings.npy 181M  mapping.npz 502K  manifest 1,038 B
+  embeddings.npy sha256 6d2a833f… — 92,524 x 512 float32, unit-norm
+
+model_versions: all six families ACTIVE at 92,524 items
+  content 20260813T173621Z ACTIVE, activated 21:12:19+02
+  (three earlier --limit development builds correctly RETIRED)
+```
+
+### Live profile inspection — the R5 feature that had never run on real data
+
+```bash
+make inspect-recommender-profile USERNAME=Jakub
+make inspect-recommender-profile USERNAME=Jakub ARGS=--json
+```
+
+Jakub is a real account with 5 ratings and 14 shelf saves across two
+shelves. Real output, abridged to the structure:
+
+```text
+Profile for Jakub
+  profile_version : v1:b37e4e52ae1bd183
+  strategy        : clustered          <- not the `none` degradation
+  evidence items  : 18
+
+Inferred interests (4):
+  [i0] adventure · fantasy · fiction        weight 18.0 · 6 books · coh 0.67
+       representative: #74757 'Harry Potter and the Chamber of Secrets'
+  [i1] dune · fantasy · fiction             weight 14.5 · 5 books · coh 0.73
+       representative: #58189 'Dune Messiah (Dune Chronicles #2)'
+  [i2] fiction · sci-fi · scifi             weight  9.0 · 3 books · coh 0.59
+       representative: #85152 'Blade Runner'
+  [i3] fiction · sci-fi · science-fiction   weight  6.0 · 2 books · coh 0.62
+       representative: #55238 'Star Wars, Episode I - The Phantom Menace'
+
+Explicit shelves (2):
+  Sci-fi  : 8 books · representative #58203 'Dune'
+  Fantasy : 6 books · representative #74757 'Harry Potter and the Chamber…'
+```
+
+The clustering separated a real reader's evidence into Tolkien/Potter
+fantasy, the Dune corpus, cyberpunk-ish SF (*Terminator*, *Blade Runner*,
+*Neuromancer*) and Star Wars — four interests from one 18-book pile, with
+no fixed K. `--json` returns the same content with the documented keys and
+**no vectors** (rec-spec §13).
+
+**Two behaviours confirmed against real rows rather than assumed:**
+
+*19 signals became 18 evidence items.* Book 58203 *Dune* is both rated
+10/10 and on the Sci-fi shelf. It appears once, at its strongest weight —
+rec-spec §7.1's "avoid uncontrolled double-counting", now demonstrated on
+live data instead of only in a unit test.
+
+*Two rated books reach no interest.* 24443 *We the Living* (8/10) and
+64527 *Alice in Wonderland* (9/10) are semantic singletons against a
+sci-fi/fantasy pile, so `min_cluster_size = 2` drops them: 16 of 18
+evidence books are cluster members. This is rec-spec §12.2's "configurable
+minimum evidence/cluster size" behaving correctly — the singleton *fallback*
+only fires when no cluster survives, which is not this case. Recorded
+because R6 needs it: the semantic generator will issue no query for those
+two books, while ALS and item-CF still see them, since they consume the
+full evidence set rather than the clustered profile. New risk #110.
+
+### Content evaluation (rec-spec §23.2)
+
+```bash
+make evaluate-content     # 4.5s, sample 2000, k=10
+```
+
+```text
+Goodreads-edge agreement (a noisy proxy, not a target)
+  overlap@k        0.0266      recall of source edges  0.0604
+Coherence (sanity, not quality — 1.0 would mean collapse)
+  same author      0.3423      same broad genre        0.7581
+Similarity spread
+  mean top-1       0.7583      mean k-th               0.6664
+```
+
+Byte-identical across two runs — the evaluation is deterministic.
+
+**The overlap number is a floor, not a verdict, and the samples show why.**
+The neighbours are good:
+
+```text
+#30 'White Jade Tiger' — Julie Lawson
+    0.663 'Child of the Owl' — Laurence Yep
+    0.661 'The Jade Peony' — Wayson Choy
+    0.661 'Forbidden City' — William Bell
+    0.652 "The Concubine's Children" — Denise Chong
+#57 'Love in the Asylum' — Lisa Carey
+    0.652 'Beyond the Glass' — Antonia White
+    0.649 'Like Being Killed' — Ellen Miller
+    0.636 'Lisa and David Today: Their Healing Journey…'
+    0.633 'The Quiet Room: A Journey Out of the Torment of Madness'
+#19 'Skyfall' — Harry Harrison
+    0.680 'The Hammer of God' — Arthur C. Clarke
+    0.679 'Orion Shall Rise' — Poul Anderson
+#204 'Mia Goes Fourth (The Princess Diaries, #4)' — Meg Cabot
+    0.869 'The Princess Diaries #1'   0.850 'Princess in Love #3'
+```
+
+*White Jade Tiger* pulls Chinese-Canadian historical fiction; *Love in the
+Asylum* pulls asylum and mental-illness narratives — thematic matches no
+author or genre field would produce. Yet **none of those 25 neighbours is a
+Goodreads edge.** That was checked rather than believed: book 204 has
+exactly one source edge in the whole database, to 50083 *A Telling of the
+Tales: Five Stories*, and not to *Princess Diaries #1* at 0.869. The graph
+holds 269,276 edges over 54,552 of 92,524 books — 41% of the catalog has no
+edge at all, and 4.94 on average among those that do. A metric measuring
+agreement with that cannot exceed it. `in_source_graph` is correct; the
+proxy is simply weak, exactly as rec-spec §23.2 says.
+
+Same-genre 0.758 with same-author 0.342 is the healthy shape: neighbours
+stay in the right part of the catalog without collapsing onto one author.
+
+### Artifact load time and per-worker memory — risk #106 measured
+
+All six families loaded into one process against the live catalog:
+
+```text
+baseline (Python + SQLAlchemy + catalog snapshot)   155 MB
+
+family              load_s   cumulative RSS above baseline
+popularity            0.05        15 MB
+source_similarity     0.04        53 MB
+item_metadata         0.23       125 MB
+als                   0.09       421 MB
+item_cf               0.20       642 MB
+content               0.15     1,020 MB
+TOTAL                 0.76     1,020 MB      process RSS 1,175 MB
+
+with mmap=True for als + content:
+TOTAL                 0.73       823 MB      process RSS   978 MB
+```
+
+Per-family deltas move between runs as freed pages get reused; the
+cumulative totals are the stable figures.
+
+**A realistic per-worker footprint is ~1.0–1.2 GB, not the 181 MB risk #106
+assumed from file size.** Loading is not the problem — 0.76s for 271 MB of
+artifacts is negligible at startup. Residency is.
+
+The content artifact costs 427 MB resident for a 181 MB file, because
+`load_content_artifact` reads the whole matrix and then fancy-indexes it
+into a second full-size array while the first is still live
+(`content.py:216`). `mmap=True` removes exactly one copy — measured 426.6 MB
+→ 245.8 MB, a 181 MB saving, with no change in load time (0.14s either way).
+
+Retrieval cost was measured at the same time: **a dot product against all
+92,524 rows takes 2.8 ms**. That is the evidence behind CLAUDE.md's "no
+vector database for the current ~92k catalog" — exact search is already
+fast enough that ANN would add infrastructure to save under 3 ms.
+
+### Gates — all green, with the training group installed
+
+```bash
+make test
+#   apps/api             212 passed
+#   packages/recommender 238 passed
+#   apps/web              93 passed (25 files)
+make lint        # clean: 140 + 52 python files, tests/, oxlint
+make typecheck   # clean: 140 + 52 source files, tsc -b
+uv run --project apps/api pytest tests/integration -q
+#                        206 passed in 20.21s
+```
+
+No migration, no OpenAPI change, no frontend change, so
+`make generate-api-client` and `make e2e` were not re-run. E2E last verified
+green in §5j.
+
+**Serving is still untouched.** `wiring.py` contains zero references to the
+five non-popularity loaders and two to `load_popularity_artifact`;
+`FuturePipelineRecommendationEngine` remains the unused plug point. R5 built
+the semantic space and the profiler; putting either on the request path is
+R6.
+
 ## 6. Risks and assumptions
 
 Recorded per CLAUDE.md: "For a genuinely unspecified detail, choose a
@@ -4077,12 +4301,23 @@ conservative, reversible default and document it."
      properly. It is the single number that decides whether a reader has
      two interests or five, and R9's evaluation is where it should get a
      real value.
-106. **The content artifact is 181 MB and dominates per-worker memory.**
-     Larger than every other family combined. Loading all six families is
-     what R9's profiling has to measure; `load_content_artifact(mmap=True)`
-     exists for when it does, but nothing has yet decided whether paging
-     from disk beats holding 181 MB resident per worker.
-107. **Rebuilding embeddings takes ~88 minutes**, so this is the one
+106. **Loading all six artifact families costs ~1.0-1.2 GB per worker** —
+     measured in §5n, and considerably worse than this risk originally
+     assumed from the 181 MB file size. All six load in 0.76s (startup is
+     not the concern) but sit at 1,020 MB above a 155 MB baseline, for a
+     1,175 MB process. Content is the largest single contributor at 427 MB
+     resident for a 181 MB file, because `load_content_artifact` holds the
+     freshly-read matrix alive while fancy-indexing it into a second
+     full-size array (`artifacts/content.py:216`). `mmap=True` removes
+     exactly one copy — 823 MB total, 978 MB process, no load-time cost.
+     **R6 is where this becomes real**, since it is the first phase to put
+     these artifacts on the request path: at four workers the difference is
+     roughly 4.7 GB versus 3.9 GB. Two things are still undecided — whether
+     to mmap by default, and whether the second copy can be avoided
+     outright by indexing into a preallocated destination. Neither was
+     changed in R5, which deliberately changed no serving behavior.
+107. **Rebuilding embeddings takes ~96 minutes** (measured; the pre-build
+     benchmark projected 88 — see §3R), so this is the one
      artifact that cannot be casually regenerated, and any change to the
      text template, tag rules or encoder invalidates all of it. All three
      are versioned in the manifest so the invalidation is visible — but the
@@ -4101,6 +4336,18 @@ conservative, reversible default and document it."
      with catalog metadata quality rather than with how good the clustering
      was, which is worth knowing before reading a profile as a judgement on
      the model.
+110. **Semantic singletons contribute nothing to the inferred profile.** On
+     the first real profile ever built (§5n), 2 of 18 evidence books reach
+     no interest — and both are *ratings*, the strongest signal there is.
+     `min_cluster_size = 2` is correct per rec-spec §12.2 and the fallback
+     ladder is not miswired; the consequence is simply that a reader whose
+     taste has isolated corners gets no semantic retrieval from them. It is
+     bounded — ALS and item-CF consume the full evidence set, so those
+     books still influence those generators — but it interacts with risk
+     #105: a lower `merge_threshold` would absorb singletons into looser
+     clusters, and neither number has been tuned against real readers. R6
+     should not paper over this with a semantic-only surface; R9 should
+     measure it.
 
 ## 7. Next phase
 

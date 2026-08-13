@@ -7,8 +7,10 @@ or via ``make build-content``. Needs the ``training`` group
 (``make setup-training``) — it downloads and runs a 0.6B transformer.
 
 **This is the slowest build in the system.** Measured on this catalog and
-this hardware: 17.6 books/s on Apple MPS at 512 tokens and batch 16, so the
-full 92,524-book pass takes about 88 minutes. ``--limit`` exists for
+this hardware: a full 92,524-book pass on Apple MPS at 512 tokens and batch
+16 sustains 16.1 books/s and takes about **96 minutes**. (A short benchmark
+sample suggested 17.6 books/s and 88 minutes; the whole-catalog rate is
+lower, so budget from the full-run number.) ``--limit`` exists for
 development; the encoder itself is a one-time ~1.2 GB download.
 
 The output is one L2-normalized ``float32`` matrix plus a manifest recording

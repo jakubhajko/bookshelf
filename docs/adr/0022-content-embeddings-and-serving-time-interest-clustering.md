@@ -102,8 +102,9 @@ and challenge-list tags — and the survivors are recognisably thematic.
 Not model limits — Qwen3-Embedding-0.6B accepts 32,768 tokens. Measured on
 this catalog: median book text is ~180 tokens and the 90th percentile ~380,
 so 512 covers the corpus. Throughput on Apple MPS at 512 tokens: 17.6
-books/s at batch 16, 15.0 at batch 32, 11.0 at batch 64. The full catalog
-takes about 88 minutes.
+books/s at batch 16, 15.0 at batch 32, 11.0 at batch 64. Sustained over
+the full catalog the rate is lower than that short-sample benchmark — 16.1
+books/s — so a full build takes about 96 minutes.
 
 ### The loader refuses an artifact that is not normalized
 
@@ -145,9 +146,14 @@ different model later.
 ## Consequences
 
 - The content artifact is 181 MB — larger than everything else combined.
-  Loading it costs real per-worker memory, and `mmap` support exists on the
-  loader for when R9's profiling decides whether to use it.
-- Rebuilding embeddings takes ~88 minutes, so it is the one artifact that
+  Measured since (plan.md §5n): it costs **427 MB resident**, because the
+  loader holds the freshly-read matrix alive while fancy-indexing it into a
+  second full-size array, and all six families together come to ~1.0 GB per
+  worker. `load_content_artifact(mmap=True)` removes exactly one copy at no
+  load-time cost. Whether to make that the default — or to avoid the second
+  copy outright — is a decision for R6, which is the first phase to put
+  these artifacts on the request path.
+- Rebuilding embeddings takes ~96 minutes, so it is the one artifact that
   cannot be casually regenerated. `--limit` exists for development, and the
   `work_id` resolution in ADR-0020 means a re-import does not *invalidate*
   the artifact, only leave new books unembedded — which the profiler
