@@ -7,12 +7,17 @@ application settings. This module holds the first category — artifact and
 model versions — because recommender Phase R3 is the first phase that
 produces artifacts other than popularity.
 
-The later categories (live signal weights, candidate quotas, per-surface RRF
-weights, ranking feature weights, diversity parameters, interest-clustering
-thresholds) are deliberately absent: they belong to the phases that
-introduce the machinery they tune (R6-R7), and declaring empty placeholders
-for them now would be inventing a contract before there is anything to
-honour it.
+The later categories arrived with the machinery they tune, rather than as
+placeholders written before anything could honour them: interest-clustering
+thresholds and semantic signal weights in R5, generator-local knobs and
+collaborative signal weights in R6, and per-surface quotas, RRF weights,
+ranking feature weights and diversity parameters in R7.
+
+The split that matters is the last one. A generator decides how deep to read
+a neighbour list; a **surface** decides how much that generator counts
+(rec-spec §17). Quotas and weights therefore live in ``SurfaceConfig`` and
+never inside a generator, which is what keeps tuning the feed from becoming
+a hunt through five retrieval implementations.
 
 ``preprocessing_version`` is separate from an artifact's ``model_version``
 on purpose. ``model_version`` is a build timestamp — it changes on every
@@ -485,3 +490,222 @@ class GeneratorConfig:
 
 
 GENERATOR_CONFIG_DEFAULT = GeneratorConfig()
+
+
+# --- Surface configuration (rec-spec §20, §17-§19; ADR-0017) ----------------
+#
+# rec-spec §20: "Implement one reusable pipeline with typed per-surface
+# configuration." The three surfaces run identical code and differ only by
+# the values below — which is what makes "the surfaces genuinely differ" a
+# testable property rather than an intention.
+
+
+@dataclass(frozen=True)
+class GeneratorQuota:
+    """One generator's participation in one surface.
+
+    ``rrf_weight`` is the `weight(surface, g)` of ADR-0017's fusion formula.
+    ``count`` is how far the generator over-retrieves: rec-spec §24 wants
+    "more than the final 60" so fusion has a pool, and a generator that
+    returns exactly the final count would make fusion a no-op.
+    """
+
+    generator: str
+    rrf_weight: float
+    count: int
+    enabled: bool = True
+
+
+#: rec-spec §20 states priorities in words — VERY HIGH down to fallback —
+#: rather than numbers. These are that vocabulary, defined once, so the
+#: surface tables below read as the specification does and a change to what
+#: "HIGH" means cannot apply to one surface and not another.
+PRIORITY_VERY_HIGH = 3.0
+PRIORITY_HIGH = 2.0
+PRIORITY_MEDIUM_HIGH = 1.5
+PRIORITY_MEDIUM = 1.0
+PRIORITY_LOW = 0.5
+PRIORITY_FALLBACK = 0.2
+
+
+@dataclass(frozen=True)
+class RankingWeights:
+    """Feature weights for the deterministic V1 ranker (rec-spec §18).
+
+    Every feature is normalized to roughly [0, 1] before weighting, so these
+    are comparable to each other and a reader can tell at a glance what
+    dominates. rec-spec §18's hard constraint — "Do not use raw popularity
+    as the dominant personalization score" — is a property of these numbers,
+    and it is asserted in a test rather than left to inspection.
+    """
+
+    #: ADR-0017's fused RRF score, the consensus signal.
+    fusion: float = 1.0
+    #: How many independent generators found this book. Agreement between
+    #: mechanisms that share no data is the strongest evidence V1 has.
+    agreement: float = 0.6
+    #: Cosine to the surface's query profile (interest centroid, shelf
+    #: profile, or the source book).
+    semantic_relevance: float = 0.5
+    #: Normalized rank within the collaborative generators.
+    collaborative_relevance: float = 0.35
+    #: Bayesian-shrunk popularity, as a quality prior only.
+    popularity_prior: float = 0.15
+    #: Similarity to the reader's strongest positive evidence.
+    evidence_affinity: float = 0.3
+    #: Agreement with the surface's own coherence notion — same genre as the
+    #: target shelf, same author as the source book.
+    surface_coherence: float = 0.2
+    #: Subtracted. Semantic similarity to Not-Interested books and to books
+    #: the reader rated 1-5 (rec-spec §18's "negative semantic similarity").
+    negative_evidence: float = 0.6
+
+
+@dataclass(frozen=True)
+class RerankConfig:
+    """Deterministic greedy/MMR reranking (rec-spec §19, ADR-0017).
+
+    Penalties are applied to a candidate's ranking score as a function of
+    what has *already been selected*, which is what makes this greedy rather
+    than a second sort. All values are per-occurrence unless noted.
+    """
+
+    #: Cosine above which two books count as near-duplicates. 0.92 is high
+    #: on purpose: 'Dune' and 'Dune *' must collide, two Dune sequels must
+    #: not.
+    near_duplicate_threshold: float = 0.92
+    #: Applied when a candidate is a near-duplicate of something selected.
+    near_duplicate_penalty: float = 1.0
+    #: Per already-selected book by the same author.
+    author_penalty: float = 0.15
+    #: Per already-selected book in the same detectable series.
+    series_penalty: float = 0.25
+    #: Per already-selected book from the same inferred interest.
+    interest_concentration_penalty: float = 0.12
+    #: Per already-selected book whose best source is the same generator.
+    source_concentration_penalty: float = 0.08
+    #: How many of the final slots are reserved for candidates that no
+    #: already-selected interest produced. rec-spec §15: exploration is a
+    #: reranking policy, never "show more bestsellers".
+    exploration_slots: int = 0
+    #: A candidate this far above the next is kept in place regardless of
+    #: penalties — rec-spec §19's "preserve highly relevant items even if
+    #: they are popular".
+    relevance_floor: float = 0.0
+
+
+@dataclass(frozen=True)
+class SurfaceConfig:
+    """Everything that makes one surface different from another."""
+
+    name: str
+    quotas: tuple[GeneratorQuota, ...]
+    ranking: RankingWeights
+    rerank: RerankConfig
+    #: ADR-0017: "defaults to ~60 and is centralized and tunable". Large
+    #: relative to the ranks that matter, so RRF stays a smooth function of
+    #: rank rather than a cliff at the top few.
+    rrf_k: int = 60
+    #: rec-spec §24's current target batch size.
+    final_count: int = 60
+
+    def quota_for(self, generator: str) -> GeneratorQuota | None:
+        for quota in self.quotas:
+            if quota.generator == generator:
+                return quota if quota.enabled else None
+        return None
+
+    @property
+    def enabled_generators(self) -> tuple[str, ...]:
+        return tuple(quota.generator for quota in self.quotas if quota.enabled)
+
+
+#: rec-spec §20.1 — broad personalized discovery across the reader's
+#: interests. ALS, item-CF and both semantic strategies are all HIGH; the
+#: source graph is LOW/MEDIUM; popularity is present but low, as a
+#: guaranteed safety and cold-start source.
+#:
+#: The two semantic strategies share one weight because the generator
+#: returns one interleaved list — and rec-spec §20.1 gives inferred
+#: interests and explicit shelf profiles the *same* priority, so splitting
+#: them would add a knob with no specified difference to express.
+HOME_SURFACE = SurfaceConfig(
+    name="home",
+    quotas=(
+        GeneratorQuota(generator="als", rrf_weight=PRIORITY_HIGH, count=150),
+        GeneratorQuota(generator="item_cf", rrf_weight=PRIORITY_HIGH, count=150),
+        GeneratorQuota(generator="semantic", rrf_weight=PRIORITY_HIGH, count=150),
+        GeneratorQuota(generator="source_similarity", rrf_weight=PRIORITY_LOW, count=100),
+        GeneratorQuota(generator="popularity", rrf_weight=PRIORITY_FALLBACK, count=100),
+    ),
+    ranking=RankingWeights(),
+    # Strongest diversity of the three (rec-spec §19).
+    rerank=RerankConfig(
+        author_penalty=0.20,
+        series_penalty=0.30,
+        interest_concentration_penalty=0.15,
+        source_concentration_penalty=0.10,
+        exploration_slots=3,
+    ),
+)
+
+#: rec-spec §20.2 — extend the **target shelf**, not the reader's global
+#: taste. The semantic target-shelf profile is VERY HIGH; the reader's
+#: global profile is deliberately unreachable here, because the semantic
+#: generator issues only the target-shelf query on this surface.
+SHELF_SURFACE = SurfaceConfig(
+    name="shelf",
+    quotas=(
+        GeneratorQuota(generator="semantic", rrf_weight=PRIORITY_VERY_HIGH, count=150),
+        GeneratorQuota(generator="item_cf", rrf_weight=PRIORITY_HIGH, count=150),
+        GeneratorQuota(generator="als", rrf_weight=PRIORITY_MEDIUM_HIGH, count=120),
+        GeneratorQuota(generator="source_similarity", rrf_weight=PRIORITY_MEDIUM, count=100),
+        GeneratorQuota(generator="popularity", rrf_weight=PRIORITY_FALLBACK, count=60),
+    ),
+    # Coherence with the shelf matters more than breadth, so coherence is
+    # weighted up and the interest-spreading penalty comes down.
+    ranking=RankingWeights(surface_coherence=0.35, semantic_relevance=0.6),
+    rerank=RerankConfig(
+        author_penalty=0.12,
+        series_penalty=0.20,
+        interest_concentration_penalty=0.05,
+        source_concentration_penalty=0.05,
+    ),
+)
+
+#: rec-spec §20.3 — books genuinely related to the source book. ALS is
+#: absent entirely (the generator reports NOT_APPLICABLE, ADR-0023), and
+#: popularity is an emergency fallback only.
+#:
+#: rec-spec §19: "do not aggressively suppress same-author items if they are
+#: genuinely relevant" — the author penalty is a third of Home's, because a
+#: reader asking what is like *Dune* is not badly served by *Dune Messiah*.
+SIMILAR_SURFACE = SurfaceConfig(
+    name="similar",
+    quotas=(
+        GeneratorQuota(generator="source_similarity", rrf_weight=PRIORITY_VERY_HIGH, count=150),
+        GeneratorQuota(generator="item_cf", rrf_weight=PRIORITY_HIGH, count=150),
+        GeneratorQuota(generator="semantic", rrf_weight=PRIORITY_HIGH, count=150),
+        GeneratorQuota(generator="popularity", rrf_weight=0.1, count=60),
+        GeneratorQuota(generator="als", rrf_weight=0.0, count=0, enabled=False),
+    ),
+    # Relevance to the source book dominates; the reader's global evidence
+    # is close to irrelevant here (rec-spec §20.3: "absent or only a tiny
+    # tie-break feature").
+    ranking=RankingWeights(
+        semantic_relevance=0.8,
+        surface_coherence=0.3,
+        evidence_affinity=0.05,
+        popularity_prior=0.05,
+    ),
+    rerank=RerankConfig(
+        author_penalty=0.05,
+        series_penalty=0.08,
+        interest_concentration_penalty=0.0,
+        source_concentration_penalty=0.05,
+    ),
+)
+
+SURFACES: Mapping[str, SurfaceConfig] = {
+    surface.name: surface for surface in (HOME_SURFACE, SHELF_SURFACE, SIMILAR_SURFACE)
+}

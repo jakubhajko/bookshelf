@@ -2178,6 +2178,14 @@ with its own `work_id` (49578285 against 3634639) and 69 ratings against
 what ADR-0017's near-duplicate reranking exists for, which is no longer
 theoretical. Risk #112.
 
+> **R7 correction.** The last sentence was wrong. ADR-0017's near-duplicate
+> reranking is *cosine* near-duplicate reranking, and this pair sits at
+> 0.7246 — further apart than *Dune* and *Dune Messiah* at 0.8092, because
+> the duplicate row's 69 ratings give it a much thinner description. No
+> threshold catches the duplicate without also suppressing the sequels.
+> Duplicate works turned out to need an identity check, not a similarity
+> one; see the R7 record above and ADR-0024.
+
 #### A fix this phase made to its own new code
 
 The source-similarity generator originally broke score ties on `book_id`
@@ -2240,7 +2248,150 @@ through the real loaders.
 
 No migration, no OpenAPI change, no frontend change, no serving change.
 
-### Phases R7-R9 — not started
+### Phase R7 — Surface config, weighted RRF, deterministic ranking and UX reranking — **done, this pass**
+
+Goal: turn five ranked lists into one authoritative ordered batch. Still no
+serving change — `wiring.py` has zero references to the pipeline. R8 is the
+serving switch.
+
+#### R7 checklist
+
+- [x] Typed `SurfaceConfig` for Home, Shelf and Similar: enabled
+  generators, per-generator quota and RRF weight, ranking feature weights,
+  reranking parameters.
+- [x] rec-spec §20's priorities implemented per surface rather than one
+  universal weight set.
+- [x] Weighted RRF, `rrf_k = 60`, 1-based ranks, dedupe by `book_id`.
+- [x] Per candidate: every contributing source, its rank, its raw score and
+  its RRF contribution preserved (rec-spec §17).
+- [x] `Ranker` protocol + deterministic implementation over eight
+  interpretable features, breakdown inspectable.
+- [x] No learned engagement ranker (ADR-0017's gate; no labels exist).
+- [x] Greedy MMR-like reranker inside the package, surface-strength
+  differentiated, with a small Home-only exploration allowance.
+- [x] Exact RRF arithmetic, provenance, surface difference and determinism
+  all tested; four sabotage checks.
+- [x] Full gates green; live full-pipeline smoke test on the real
+  artifacts (§5p).
+
+#### What R7 corrected in R6's record
+
+R6 recorded the `'Dune'` / `'Dune *'` duplicate (risk #112) and concluded
+that "ADR-0017's near-duplicate reranking is the intended answer and is now
+known to be load-bearing rather than theoretical." **That was wrong**, and
+R7's live run is what showed it. Measured on the real artifact:
+
+```text
+cos('Dune', 'Dune *')       = 0.7246
+cos('Dune', 'Dune Messiah') = 0.8092
+```
+
+The duplicate is *less* similar to the original than the sequel is, so no
+threshold separates them — anything catching `'Dune *'` also suppresses
+`'Dune Messiah'`, which on Similar Books is the right answer. The cause is
+not an encoder defect: the duplicate row has 69 ratings against 16,541, so
+its description and tags are far thinner, and R5's text builder faithfully
+encodes the text that exists. The rows are near-duplicate in **work
+identity**, not in content.
+
+ADR-0024 records the correction and the two mechanisms that replaced the
+single assumed one — an exact `duplicate_key(title, author)` alongside the
+cosine check, neither subsuming the other. The risk entry has been rewritten
+accordingly.
+
+#### The bug the live run found
+
+The reranker compared each candidate only against what it had already
+**selected**. On Similar Books the source book is excluded from the results,
+so it was never in that set — nothing was comparing candidates to the book
+the reader is looking at. Similar-to-*Dune* returned `'Dune *'` at rank 10,
+which is close to the worst recommendation that surface can make.
+
+`RerankContext.reference_book_ids` fixes it by seeding the duplicate checks
+with books that are present but do not occupy a slot. They seed the
+duplicate checks *only* — not the author or series counters — because
+rec-spec §19 says not to aggressively suppress same-author items there. On
+the real data, `'Dune *'` left the top 20 and *House Atreides* took its
+place.
+
+#### What the pipeline actually produces
+
+Real reader, real artifacts, `final = 20` (§5p). Home:
+
+```text
+ 1. 'Chapterhouse: Dune'                als+item_cf+semantic   2.432
+ 2. 'The Return of the King'            als+item_cf+pop+sem    2.357
+ 3. 'Harry Potter and the Order of…'    als+item_cf+semantic   2.046
+ 4. 'House Atreides (Prelude to Dune)'  als+semantic           1.969
+ 5. 'Heretics of Dune'                  als+item_cf+semantic   1.490
+```
+
+Similar-to-*Dune* leads with *Heretics of Dune*, *God Emperor of Dune*,
+*This Alien Shore*, *A Deepness in the Sky*, *The Fall of Hyperion*. Home
+and Similar share only 4 of 20, and each holds 16 distinct authors in 20
+slots — the surfaces genuinely differ and the diversity policy is doing
+work.
+
+#### The finding that matters most for R9
+
+**The generators barely overlap.** Across 602 fused Home candidates, only
+**21 were found by more than one generator** — 3.5%. On Similar it is 3 of
+310.
+
+RRF's central virtue is that it rewards agreement between independent
+mechanisms, and on this data there is almost nothing to reward. The fused
+order is therefore driven overwhelmingly by within-generator rank multiplied
+by a surface weight, which makes those weights far more load-bearing than
+intended, and makes item-CF's saturated ranks (risk #111) more damaging than
+they look. It is visible in the output: `"New Treasury of Children's
+Poetry"` reaches Home rank 6 on the strength of being item-CF's rank 1 and
+nothing else. Risk #119.
+
+#### Decisions worth recording
+
+- **rec-spec §20's word priorities are named constants** (`PRIORITY_HIGH`
+  and friends), so the surface tables read like the specification and a
+  change to what "HIGH" means cannot apply to one surface and not another.
+- **One semantic weight per surface**, not one per query strategy.
+  rec-spec §20.1 gives inferred interests and explicit shelf profiles the
+  *same* priority, so splitting them would add a knob with no specified
+  difference to express; on Shelf the generator issues only the target-shelf
+  query anyway.
+- **Semantic relevance takes the best query, never the mean** — averaging
+  would penalize a book for being unrelated to a reader's other interests,
+  undoing ADR-0016's multi-interest profiling one layer below where it was
+  built.
+- **Popularity is normalized within the candidate set**, because against the
+  catalog it would be near-constant and a constant feature cannot break a
+  tie, which is its only job.
+- **Two assertions encode rec-spec's prohibitions as tests** rather than
+  intentions: popularity is never the strongest RRF weight on any surface,
+  and never the dominant ranking feature.
+- **Exploration is Home-only.** Similar Books with an exploration allowance
+  is Similar Books that sometimes ignores the book you asked about.
+
+#### Changed files (R7)
+
+New in `packages/recommender/src/book_recommender/pipeline/`:
+
+- `fusion.py` — weighted RRF, `FusedCandidate`, `SourceContribution`.
+- `ranking.py` — `Ranker` protocol, `DeterministicRanker`, `RankingContext`.
+- `reranking.py` — `DiversityReranker`, `duplicate_key`, `series_of`.
+
+Changed:
+
+- `config.py` — `SurfaceConfig`, `GeneratorQuota`, `RankingWeights`,
+  `RerankConfig`, the three shipped surfaces, priority constants.
+- `tests/generator_world.py` — item-metadata artifact added, with titles and
+  authors chosen so author, series and duplicate control have something real
+  to act on.
+- `docs/adr/0024-…md` — new.
+
+Tests (+77): 18 fusion, 22 ranking, 37 reranking.
+
+No migration, no OpenAPI change, no frontend change, no serving change.
+
+### Phases R8-R9 — not started
 
 Scope, tasks and per-phase acceptance criteria live in
 `RECOMMENDER_IMPLEMENTATION_PLAN.md` and are not duplicated here. Each phase
@@ -3544,6 +3695,121 @@ Two distinct works, so the near-duplicate is in the source data, not the
 import. The nearest semantic neighbour of *Dune* legitimately includes
 another *Dune* (risk #112).
 
+## 5p. Recommender Phase R7 validation commands and results
+
+### Gates
+
+```bash
+make test
+#   apps/api             212 passed   (unchanged — no application code added)
+#   packages/recommender 411 passed   (was 334: +77 pipeline tests)
+#   apps/web              93 passed   (unchanged)
+make lint        # clean, all four targets
+make typecheck   # clean: 140 + 70 source files, tsc -b
+uv run --project apps/api pytest tests/integration -q
+#                        206 passed   (unchanged)
+```
+
+No migration, no OpenAPI change, no frontend change. `wiring.py` still has
+zero references to the pipeline — R8 is the serving switch.
+
+### Sabotage verification
+
+| Sabotage | Tests that caught it |
+|---|---|
+| RRF uses 0-based ranks | 4 fusion arithmetic/provenance tests |
+| fusion keeps only the winning source | 5, across fusion and ranking |
+| ranker averages queries instead of taking the best | the multi-interest test |
+| reranker ignores what is already selected | 5 reranking tests |
+
+### Live full-pipeline smoke test
+
+Real reader (`Jakub`), real artifacts, all three surfaces, `final = 20`.
+Invariants asserted in-process: no duplicates, no excluded book, dense
+1-based positions.
+
+```text
+HOME     generators als:150 item_cf:150 semantic:150 source:81 pop:100
+         -> 602 unique fused
+         generate 16ms | fuse 1.1ms | rank 2ms | rerank 78ms
+
+ 1. 'Chapterhouse: Dune (Dune Chronicles #6)'        als+item_cf+semantic  2.432
+ 2. 'The Return of the King'                         als+item_cf+pop+sem   2.357
+ 3. 'Harry Potter and the Order of the Phoenix'      als+item_cf+semantic  2.046
+      penalty 0.25 [interest x1, source x1]
+ 4. 'House Atreides (Prelude to Dune #1)'            als+semantic          1.969
+ 5. 'Heretics of Dune (Dune Chronicles, #5)'         als+item_cf+semantic  1.490
+      penalty 0.85 [author x1, series x1, interest x1, source x2]
+ 6. "New Treasury of Children's Poetry"              item_cf               1.405
+```
+
+```text
+SIMILAR to #58203 'Dune'    -> 310 unique fused
+         generate 2ms | fuse 0.3ms | rank 1ms | rerank 51ms
+
+ 1. 'Heretics of Dune'          item_cf+semantic          2.566
+ 2. 'God Emperor of Dune'       item_cf+semantic          2.161
+ 3. 'This Alien Shore'          semantic+source_similarity 1.996
+ 5. 'A Deepness in the Sky'     source_similarity          1.565
+ 9. 'The Fall of Hyperion'      source_similarity          1.413
+10. 'House Atreides'            semantic                   1.384
+```
+
+The penalty trace is the readable part: *Heretics of Dune* is the fifth-best
+Home candidate on relevance and lands fifth *after* paying 0.85 for sharing
+an author and series with an already-selected book — rec-spec §19's tunables
+are visible in the output rather than inferred.
+
+**Cross-surface:** Home and Similar share only 4 of 20 results, and each
+holds 16 distinct authors in 20 slots. The surfaces genuinely differ, and
+the diversity policy is doing measurable work.
+
+**Latency**, worst case (Home over 602 candidates):
+
+```text
+generate 16 ms | fuse 1.1 ms | rank 2 ms | rerank 78 ms  = ~97 ms
+```
+
+Against rec-spec §24's ~5 s provider timeout. The reranker is 80% of it,
+because it is greedy and re-scores every remaining candidate at every step.
+Comfortable now; it is where the cost lives if that changes (risk #118).
+
+### The duplicate that the run caught, and the measurement that redirected the fix
+
+Similar-to-*Dune* returned `'Dune *'` at rank 10. The reranker compares
+candidates to what it has already **selected**, and the source book is
+excluded from results, so nothing ever compared candidates to the book the
+reader was looking at.
+
+The obvious fix — lower the cosine threshold — was measured first:
+
+```text
+cos('Dune' 58203, 'Dune *' 67405)  = 0.7246
+  vs 'Dune Messiah'                = 0.8092
+  vs 'Children of Dune'            = 0.7257
+  vs 'The Dune Encyclopedia'       = 0.7091
+```
+
+The duplicate is further away than the sequel. Any threshold catching it
+suppresses *Dune Messiah* and *Children of Dune* too, which on Similar Books
+are the correct answers. So the fix is an identity check
+(`duplicate_key(title, author)`) plus reference books seeded into the
+duplicate state — ADR-0024. After it, `'Dune *'` leaves the top 20 and
+*House Atreides* takes its place.
+
+### Generator overlap — the number that should shape R9
+
+```text
+HOME     candidates found by >1 generator:  21 / 602   (3.5%)
+SHELF                                       13 / 512   (2.5%)
+SIMILAR                                      3 / 310   (1.0%)
+```
+
+RRF is chosen for rewarding agreement between independent mechanisms
+(ADR-0017). On this data there is almost nothing to reward, so the fused
+order is driven overwhelmingly by within-generator rank times a surface
+weight. Risk #119.
+
 ## 6. Risks and assumptions
 
 Recorded per CLAUDE.md: "For a genuinely unspecified detail, choose a
@@ -4639,13 +4905,17 @@ conservative, reversible default and document it."
      aggregation tiebreak in R4's `candidates_from_seeds` — agreement
      count, or a similarity floor — rather than a smaller weight. Not
      changed in R6, which does not own that function.
-112. **The catalog contains near-duplicate works, and similarity finds
+112. **The catalog contains near-duplicate works, and cosine cannot detect
      them.** `#58203 'Dune'` and `#67405 'Dune *'` are separate rows with
-     separate `work_id`s (16,541 ratings against 69). Similar-to-Dune
-     returns the other Dune at rank 6, correctly — it really is the nearest
-     neighbour. ADR-0017's near-duplicate reranking is the intended answer
-     and is now known to be load-bearing rather than theoretical. Unknown:
-     how many such pairs exist; nothing has counted them.
+     separate `work_id`s (16,541 ratings against 69). **Rewritten in R7**,
+     which measured what R6 asserted: the pair sits at cosine 0.7246, while
+     *Dune*/*Dune Messiah* sits at 0.8092. The duplicate is *further* from
+     the original than the sequel, because 69 ratings buy a much thinner
+     description, so any threshold catching it also suppresses the sequels.
+     R7 added an exact identity check (`duplicate_key`, ADR-0024) and the
+     pair no longer reaches the Similar Books batch. Still open: the key is
+     exact, so `'Dune: 40th Anniversary Edition'` remains a separate work to
+     it, and **nobody has counted how many such pairs exist** — see #117.
 113. **The semantic generator's score is not monotonically decreasing.**
      Rank is interleave position, by design (ADR-0023). RRF consumes rank so
      this is invisible today, but any later code that sorts semantic
@@ -4665,52 +4935,112 @@ conservative, reversible default and document it."
      was exercised. The score floor is the one most likely to be wrong: it
      is the only tunable here that can silently *remove* results.
 
+### Recommender Phase R7
+
+116. **Duplicate suppression depends on the item-metadata artifact.** The
+     identity check reads title and author from it, so without that artifact
+     there is no duplicate control at all beyond the cosine check — which is
+     precisely the mechanism measured *not* to catch the case that motivated
+     this (risk #112). rec-spec §27 degradation, honestly, but the
+     degradation is larger than it looks.
+117. **The duplicate key is exact, and nobody has counted the duplicates.**
+     `'Dune'` and `'Dune *'` collapse; `'Dune: 40th Anniversary Edition'`
+     would not. Fuzzy matching was rejected as premature (ADR-0024) because
+     it adds a threshold and a false-positive class to fix a problem of
+     unmeasured size. **Counting near-duplicate works in the catalog is
+     cheap and has not been done** — that measurement should precede any
+     decision about deduplicating at import time, which is a catalog change
+     with consequences for ratings, shelves and permalinks.
+118. **The reranker is ~80% of pipeline latency.** ~78 ms of a ~97 ms Home
+     request, because it is greedy and re-scores every remaining candidate
+     at each of 20 steps over ~600 candidates. Fine against a ~5 s budget,
+     and it scales with `candidates x limit` — a larger final batch or a
+     deeper pool makes it quadratic-ish. Nothing needs doing now; it is
+     recorded so the first person to see a slow request looks here.
+119. **The generators barely overlap, which undermines RRF's main
+     virtue.** Only 3.5% of Home's fused candidates (21 of 602) were found
+     by more than one generator; Similar is 1.0%. RRF was chosen for
+     rewarding agreement between independent mechanisms (ADR-0017), and
+     there is almost no agreement to reward — so the order is driven by
+     within-generator rank times a surface weight, which makes those weights
+     far more load-bearing than intended and amplifies item-CF's saturated
+     ranks (risk #111). `"New Treasury of Children's Poetry"` reaching Home
+     rank 6 on the strength of one generator's rank 1 is the visible
+     symptom. Three things could be true and none is measured: the quotas
+     are too shallow for the lists to intersect, the generators are genuinely
+     complementary (which would be good news), or item-CF's noise means its
+     candidates *should* rarely be confirmed. R9 should measure which.
+120. **Every weight in `SurfaceConfig` is reasoned, not evaluated.** The RRF
+     weights come from rec-spec §20's word priorities, and the ranking and
+     reranking weights from argument about what should matter. No labels
+     exist to tune against — the same gate ADR-0017 set for the learned
+     ranker. Two prohibitions *are* enforced by tests (popularity is never
+     the strongest RRF weight nor the dominant ranking feature), but "not
+     obviously wrong" is the current standard for the rest.
+
 ## 7. Next phase
 
-**Recommender Phase R7 — surface configuration, weighted RRF, the
-deterministic ranker and UX reranking.** Scope and acceptance criteria are
-in `RECOMMENDER_IMPLEMENTATION_PLAN.md`; ADR-0017 governs all four, and
-ADR-0023 defines the generator contract R7 consumes.
+**Recommender Phase R8 — pipeline engine integration, cold-start UI and the
+serving switch.** Scope and acceptance criteria are in
+`RECOMMENDER_IMPLEMENTATION_PLAN.md`. ADR-0023 defines the generator
+contract, ADR-0017 and ADR-0024 the fusion/ranking/reranking R8 wires up,
+and ADR-0006/ADR-0007 the provider seam and persistence it must respect.
 
-R7 turns five ranked lists into one ordered batch. The five exist, are
-independently tested, and have been run together against the real artifacts
-(§5o) — what does not exist yet is anything that decides how much each one
-counts.
+**R8 is the phase that changes what a reader sees.** Everything below it now
+exists, is tested in isolation, and has been run end to end against the real
+artifacts (§5p) — but `wiring.py` still loads only popularity, and
+`FuturePipelineRecommendationEngine` is still the placeholder that raises.
+R8 replaces it, which means R8 is the first phase since R2 whose bugs are
+visible to a user.
 
-**The generators are not interchangeable, and R6 made this concrete rather
-than statistical.** For one real reader, from identical evidence:
+What R8 has to connect:
 
-| Generator | Top of its list |
+| Stage | What exists |
 |---|---|
-| ALS | *The Return of the King*, *The Two Towers*, *Ender's Game* |
-| semantic | Dune, Harry Potter, *Count Zero*, Star Wars — one per interest |
-| source similarity | *House Corrino*, then a large tie group |
-| item-CF | children's poetry, regency romance, obscure mysteries |
-| popularity | Calvin and Hobbes |
+| context | `build_user_context` + `build_semantic_profile(...).combined()` |
+| generators | five, behind `CandidateGenerator` (R6) |
+| fusion | `fuse(results, surface=...)` (R7) |
+| ranking | `DeterministicRanker` + `RankingContext` (R7) |
+| reranking | `DiversityReranker` + `RerankContext` (R7) |
+| surfaces | `HOME_SURFACE`, `SHELF_SURFACE`, `SIMILAR_SURFACE` |
 
-Four things R7 should keep in view, all recorded above with evidence:
+Five things R8 should keep in view, all recorded above with evidence:
 
-- **Weighting item-CF by its coverage imports its noise.** Its breadth
-  (0.547 vs ALS's 0.046) is a real argument for including it, but 10.4% of
-  its edges are saturated at similarity 1.0, so the top of its list is
-  ordered by a `book_id` tiebreak (risk #111). Fixing the aggregation is
-  probably better than lowering the weight; the function belongs to R4.
-- **ALS is accurate and concentrated** (Gini 0.86 vs 0.374): weights that
-  ignore this import its concentration into the feed (risk #98).
-- **Near-duplicate works are real** — `'Dune'` and `'Dune *'` are separate
-  rows — so ADR-0017's near-duplicate reranking is load-bearing (risk #112).
-- **The latency budget is intact.** All five generators together run in
-  under 20 ms against a ~5 s provider timeout, so fusion, ranking and
-  reranking have room; the constraint that is *not* comfortable is memory,
-  at ~1.0-1.2 GB per worker for all six artifact families (risk #106).
+- **Memory, not latency, is the binding constraint.** A full Home request is
+  ~97 ms against a ~5 s timeout, but all six artifact families cost
+  ~1.0-1.2 GB per worker (risk #106). `load_content_artifact(mmap=True)`
+  saves ~181 MB of that at no load-time cost and is still not the default —
+  R8 owns that decision, because R8 is what loads them for real.
+- **The ranker and reranker need context the engine must assemble**: query
+  vectors from the semantic profile, negative evidence from Not-Interested
+  and low ratings, coherent genres/authors per surface, and
+  `reference_book_ids` on Similar. Skipping any of them silently disables a
+  feature rather than failing — Similar Books without `reference_book_ids`
+  is how `'Dune *'` reached rank 10 (ADR-0024).
+- **No open DB transaction during inference** (CLAUDE.md), and the context
+  must be built before the read transaction ends. The smoke test disposes
+  the engine before running the pipeline for exactly this reason.
+- **Engine order is authoritative and gets persisted** (ADR-0006,
+  ADR-0007). Nothing downstream may re-sort. `candidate_sources` stays
+  plural, and per-source rank/score/contribution must survive into
+  `recommendation_results` without putting a diagnostics blob on all 60
+  rows (ADR-0017).
+- **Popularity must remain a working fallback at every step** (rec-spec
+  §27). It is the one generator that produces candidates for a reader with
+  no evidence at all, and the standalone `PopularityRecommendationEngine`
+  still exists behind the provider for when the pipeline itself cannot run.
 
-R7 has not been started. Do not begin it as part of an R6 pass.
+R8 has not been started. Do not begin it as part of an R7 pass.
 
-**The drift-item ledger stayed closed.** R4 emptied it; R5 added no new
-items; R6 added none — its one correction (the source-similarity tiebreak,
-found by the live run) was made in the same pass, and the two problems it
-could not fix in scope are recorded as risks #111 and #112 rather than as
-silent debt.
+**The drift-item ledger stayed closed, and R7 emptied one entry from it.**
+R4 emptied it; R5 and R6 added none. R7 fixed a defect its own live run
+found (the reranker never comparing candidates to the source book) and
+**corrected an R6 conclusion that was wrong** — that ADR-0017's cosine
+near-duplicate reranking would handle duplicate works. It does not, which
+was measured rather than argued, and risk #112 has been rewritten. What R7
+could not close is recorded as risks #116-#120 rather than left implicit,
+the largest being #119: the generators overlap on 3.5% of candidates, so
+RRF has almost no agreement to reward.
 
 ### The application sequence is complete
 

@@ -32,12 +32,14 @@ from book_recommender.artifacts import (
     CatalogSnapshot,
     ContentEmbeddings,
     ItemCfNeighbors,
+    ItemMetadataTable,
     LocalArtifactStorage,
     PopularityArtifact,
     SourceSimilarityGraph,
     load_als_artifact,
     load_content_artifact,
     load_item_cf_artifact,
+    load_item_metadata_artifact,
     load_popularity_artifact,
     load_source_similarity_artifact,
     write_artifact,
@@ -45,12 +47,20 @@ from book_recommender.artifacts import (
 from book_recommender.artifacts.als import ITEM_FACTORS_FILENAME, write_item_factors
 from book_recommender.artifacts.content import EMBEDDINGS_FILENAME, write_embeddings
 from book_recommender.artifacts.item_cf import NEIGHBORS_FILENAME, write_item_cf_neighbors
+from book_recommender.artifacts.item_metadata import METADATA_FILENAME, write_item_metadata
 from book_recommender.artifacts.popularity import SCORES_FILENAME, write_popularity_scores
 from book_recommender.artifacts.source_similarity import (
     GRAPH_FILENAME,
     write_source_similarity_graph,
 )
-from book_recommender.config import ALS, CONTENT, ITEM_CF, POPULARITY, SOURCE_SIMILARITY
+from book_recommender.config import (
+    ALS,
+    CONTENT,
+    ITEM_CF,
+    ITEM_METADATA,
+    POPULARITY,
+    SOURCE_SIMILARITY,
+)
 from book_recommender.contracts.context import (
     RatingSnapshot,
     SavedBookSnapshot,
@@ -215,6 +225,61 @@ def write_popularity(storage: LocalArtifactStorage) -> None:
     )
 
 
+#: Titles and authors chosen so the reranker's controls have something real
+#: to act on: two books share an author *and* a series inside the fantasy
+#: group, and 104 is a deliberate near-duplicate of 103 by title.
+GENRE_BY_GROUP = ("fantasy", "science fiction", "romance")
+AUTHORS = {
+    101: "Alpha Author",
+    102: "Alpha Author",
+    103: "Beta Author",
+    104: "Beta Author",
+    105: "Gamma Author",
+    106: "Gamma Author",
+    107: "Delta Author",
+    108: "Epsilon Author",
+    109: "Zeta Author",
+    110: "Zeta Author",
+    111: "Eta Author",
+    112: "Theta Author",
+}
+TITLES = {
+    101: "First Fantasy (Alpha Saga, #1)",
+    102: "Second Fantasy (Alpha Saga, #2)",
+    103: "Third Fantasy",
+    104: "Fourth Fantasy",
+    105: "First Scifi (Gamma Cycle, #1)",
+    106: "Second Scifi (Gamma Cycle, #2)",
+    107: "Third Scifi",
+    108: "Fourth Scifi",
+    109: "First Romance",
+    110: "Second Romance",
+    111: "Third Romance",
+    112: "Fourth Romance",
+}
+
+
+def write_metadata(storage: LocalArtifactStorage) -> None:
+    genre_vocab = list(GENRE_BY_GROUP)
+    write_artifact(
+        storage,
+        ITEM_METADATA,
+        model_version=MODEL_VERSION,
+        catalog_version=CATALOG_VERSION,
+        items=ITEMS,
+        payloads={
+            METADATA_FILENAME: lambda path: write_item_metadata(
+                path,
+                titles=[TITLES[book_id] for book_id in ALL_BOOKS],
+                authors=[AUTHORS[book_id] for book_id in ALL_BOOKS],
+                genre_codes=[_group_of(book_id) for book_id in ALL_BOOKS],
+                genre_vocab=genre_vocab,
+            )
+        },
+        trained_at=datetime(2026, 8, 13, tzinfo=UTC),
+    )
+
+
 def build_all(tmp_path: Path) -> LocalArtifactStorage:
     storage = LocalArtifactStorage(tmp_path)
     write_content(storage)
@@ -222,6 +287,7 @@ def build_all(tmp_path: Path) -> LocalArtifactStorage:
     write_item_cf(storage)
     write_source_graph(storage)
     write_popularity(storage)
+    write_metadata(storage)
     return storage
 
 
@@ -243,6 +309,10 @@ def load_source_graph(storage: LocalArtifactStorage) -> SourceSimilarityGraph:
 
 def load_popularity(storage: LocalArtifactStorage) -> PopularityArtifact:
     return load_popularity_artifact(storage, catalog=CATALOG)
+
+
+def load_metadata(storage: LocalArtifactStorage) -> ItemMetadataTable:
+    return load_item_metadata_artifact(storage, catalog=CATALOG)
 
 
 def user_context(
