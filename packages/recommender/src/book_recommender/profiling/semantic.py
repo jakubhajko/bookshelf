@@ -1,15 +1,20 @@
-"""Assembling a reader's semantic profile from application state
-(rec-spec §12, §13).
+"""Turning a ``UserContext`` into a semantic profile (rec-spec §12, §13).
 
-The bridge between the application (which knows what a reader did) and
-``book_recommender.profiling`` (which knows how to turn that into
-interests). Everything inferential lives in the recommender package; this
-module only gathers evidence and applies the signal policy.
+Signal policy in, interests and shelf profiles out. Pure over the context
+and the content artifact: no ORM, no I/O, no clock.
 
-That split is what makes rec-spec §13's requirement enforceable — "The
-inspection path must reuse the **same profiling code** used by the live
-recommender" — because there is only one place the clustering could live,
-and it is not here.
+**Moved here from ``apps/api`` in R8.** It lived on the application side
+while only the inspection CLI used it, which was a reasonable place for
+"gather evidence and apply the signal policy". R8 puts it on the request
+path: the pipeline engine builds a reader's profile per batch, and an
+engine inside ``packages/recommender`` cannot import from ``apps/api``.
+Nothing about the code changed in the move — the module never touched
+FastAPI or SQLAlchemy, which is what made it movable at all.
+
+rec-spec §13's requirement that inspection "must reuse the **same profiling
+code** used by the live recommender" is now enforced by construction rather
+than by convention: the CLI and the engine call this same function, and
+there is nowhere else the clustering could live.
 """
 
 from __future__ import annotations
@@ -24,15 +29,21 @@ from book_recommender.config import (
     SignalWeights,
 )
 from book_recommender.contracts.context import UserContext
-from book_recommender.profiling import (
-    BookDescriptor,
+
+# Sibling modules directly, not the package's own ``__init__`` — this module
+# is imported *by* that ``__init__``, so a package-level import here is a
+# cycle.
+from book_recommender.profiling.interests import (
     EmbeddingLookup,
     EvidenceItem,
     InterestProfile,
-    ProfileSummary,
     ShelfProfile,
     build_interest_profile,
     build_shelf_profiles,
+)
+from book_recommender.profiling.summaries import (
+    BookDescriptor,
+    ProfileSummary,
     summarize_profile,
 )
 

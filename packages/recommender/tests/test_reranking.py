@@ -166,7 +166,9 @@ class TestPenalties:
         candidates = [candidate(101, 1.0), candidate(102, 0.99), candidate(109, 0.4)]
         context = RerankContext(
             surface=surface(
-                near_duplicate_threshold=0.9,
+                # Below the fixture's 0.735 within-group cosine: 101 and 102
+                # are the closest pair it has.
+                near_duplicate_threshold=0.7,
                 near_duplicate_penalty=1.0,
                 author_penalty=0.0,
                 series_penalty=0.0,

@@ -28,6 +28,12 @@ from book_recommender.profiling.interests import (
     build_shelf_profiles,
     query_vector_for,
 )
+from book_recommender.profiling.semantic import (
+    SemanticProfile,
+    build_semantic_profile,
+    collect_evidence,
+    summarize,
+)
 from book_recommender.profiling.summaries import (
     BookDescriptor,
     InterestClusterSummary,
@@ -49,14 +55,18 @@ __all__ = [
     "ProfileStrategy",
     "ProfileSummary",
     "ShelfProfile",
+    "SemanticProfile",
     "ShelfProfileSummary",
     "average_linkage_clusters",
     "build_interest_profile",
     "build_label",
+    "build_semantic_profile",
     "build_shelf_profiles",
+    "collect_evidence",
     "cosine_similarity_matrix",
     "medoid_index",
     "query_vector_for",
+    "summarize",
     "summarize_cluster",
     "summarize_profile",
     "summarize_shelf",

@@ -25,7 +25,7 @@ import sys
 
 from book_recommender.artifacts import load_content_artifact, load_item_metadata_artifact
 from book_recommender.exceptions import IncompatibleArtifactError
-from book_recommender.profiling import ProfileSummary
+from book_recommender.profiling import ProfileSummary, build_semantic_profile, summarize
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -37,7 +37,6 @@ from book_app.modules.recommendations.artifact_paths import (
     read_catalog_snapshot,
 )
 from book_app.modules.recommendations.context_builder import build_user_context
-from book_app.modules.recommendations.semantic_profile import build_semantic_profile, summarize
 from book_app.modules.shelves.models import Shelf
 from book_app.modules.users.models import User
 

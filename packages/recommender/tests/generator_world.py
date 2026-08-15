@@ -89,7 +89,7 @@ USER_ID = UUID("00000000-0000-0000-0000-0000000000aa")
 SHELF_FANTASY = UUID("00000000-0000-0000-0000-0000000000f1")
 SHELF_SCIFI = UUID("00000000-0000-0000-0000-0000000000f2")
 
-DIMENSION = 4
+DIMENSION = 8
 
 
 def _group_of(book_id: int) -> int:
@@ -99,15 +99,26 @@ def _group_of(book_id: int) -> int:
     raise AssertionError(f"{book_id} is not in the fixture world")
 
 
+#: How much of each book's vector is its own rather than its group's.
+#: Chosen so within-group cosine lands near 0.74 and cross-group at 0.0 —
+#: books in a group are recognisably alike without being *duplicates*.
+#:
+#: The first version of this fixture gave every book in a group the same
+#: axis plus a 0.01 jitter, making them 0.999 alike. That is not what a
+#: taste group looks like, and it silently fired the reranker's
+#: near-duplicate penalty on every second candidate, which hid real
+#: ordering behaviour behind a constant 1.0 penalty.
+_BOOK_AXIS_WEIGHT = 0.6
+
+
 def group_vectors() -> np.ndarray:
-    """Unit-norm vectors: one dominant axis per group, with a small
-    per-book offset on the last axis so within-group order is stable and
-    strictly decreasing rather than an arbitrary tie."""
+    """Unit-norm vectors: one shared axis per taste group, plus one axis
+    unique to each book so members of a group are similar but distinct."""
     vectors = np.zeros((len(ALL_BOOKS), DIMENSION), dtype=np.float32)
     for row, book_id in enumerate(ALL_BOOKS):
-        axis = _group_of(book_id)
-        vectors[row, axis] = 1.0
-        vectors[row, 3] = 0.01 * (book_id % 10)
+        group = _group_of(book_id)
+        vectors[row, group] = 1.0
+        vectors[row, len(GROUPS) + GROUPS[group].index(book_id)] = _BOOK_AXIS_WEIGHT
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     return (vectors / norms).astype(np.float32)
 

@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session, sessionmaker
 def _settings(
     database_url: str,
     *,
-    provider: Literal["mock", "popularity", "future_pipeline"],
+    provider: Literal["mock", "popularity", "pipeline"],
     artifact_path: Path,
 ) -> Settings:
     return Settings(
@@ -73,12 +73,25 @@ def test_mock_primary_is_wrapped_with_a_popularity_fallback(
     assert isinstance(provider, FallbackProvider)
 
 
-def test_future_pipeline_primary_is_wrapped_with_a_popularity_fallback(
+def test_pipeline_primary_is_wrapped_with_a_popularity_fallback(
     test_database_url: str, test_session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
-    settings = _settings(
-        test_database_url, provider="future_pipeline", artifact_path=tmp_path
-    )
+    settings = _settings(test_database_url, provider="pipeline", artifact_path=tmp_path)
+    provider = build_recommendation_provider(settings, test_session_factory)
+    assert isinstance(provider, FallbackProvider)
+
+
+def test_pipeline_builds_with_no_artifacts_at_all(
+    test_database_url: str, test_session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """rec-spec §27: a missing artifact degrades, it does not stop startup.
+
+    ``tmp_path`` holds no artifacts whatsoever, so every generator is
+    constructed with ``None`` and reports NO_ARTIFACT. The process must
+    still boot and still answer requests — through the popularity fallback
+    if the pipeline itself has nothing to say.
+    """
+    settings = _settings(test_database_url, provider="pipeline", artifact_path=tmp_path)
     provider = build_recommendation_provider(settings, test_session_factory)
     assert isinstance(provider, FallbackProvider)
 

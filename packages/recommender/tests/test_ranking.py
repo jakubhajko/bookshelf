@@ -81,7 +81,7 @@ def only(feature: str, weight: float = 1.0) -> SurfaceConfig:
 
 
 def axis(index: int) -> np.ndarray:
-    vector = np.zeros(4)
+    vector = np.zeros(8)
     vector[index] = 1.0
     return vector
 
@@ -145,8 +145,9 @@ class TestFeatures:
             query_vectors=(axis(0), axis(2)),
         )
         ranked = DeterministicRanker().rank(fused, context=context)
-        # Both books match one query almost perfectly, so both score high.
-        assert all(candidate.features["semantic_relevance"] > 0.9 for candidate in ranked)
+        # Each book matches its own group's query at ~0.86 (the fixture's
+        # within-group ceiling), so both score high on their best query.
+        assert all(candidate.features["semantic_relevance"] > 0.8 for candidate in ranked)
 
     def test_negative_evidence_is_subtracted(self, storage: LocalArtifactStorage) -> None:
         """rec-spec §18's "negative semantic similarity / explicit negative

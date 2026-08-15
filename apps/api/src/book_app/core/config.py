@@ -95,8 +95,12 @@ class Settings(BaseSettings):
     artifact_storage_local_path: Path = Path("data/artifacts")
     artifact_storage_s3_bucket: str | None = None
 
-    # --- Recommendation provider selection (behavior lands in Phase 5) ---
-    recommendation_provider: Literal["mock", "popularity", "future_pipeline"] = "mock"
+    # --- Recommendation provider selection ---
+    #: ``pipeline`` is the real funnel (R8). It replaced the
+    #: ``future_pipeline`` placeholder, which raised on every call and
+    #: existed only to reserve the seam. ``mock`` and ``popularity`` remain
+    #: for development and as the standalone fallback respectively.
+    recommendation_provider: Literal["mock", "popularity", "pipeline"] = "mock"
 
     # --- Demo toggle (behavior lands in Phase 4/9); must never be true in production ---
     demo_mode_enabled: bool = False

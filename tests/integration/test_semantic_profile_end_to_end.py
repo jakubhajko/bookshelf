@@ -18,10 +18,6 @@ from uuid import UUID, uuid4
 import numpy as np
 from book_app.modules.recommendations.artifact_paths import read_catalog_snapshot
 from book_app.modules.recommendations.context_builder import build_user_context
-from book_app.modules.recommendations.semantic_profile import (
-    build_semantic_profile,
-    summarize,
-)
 from book_recommender.artifacts import (
     LocalArtifactStorage,
     load_content_artifact,
@@ -34,6 +30,10 @@ from book_recommender.artifacts.content import EMBEDDINGS_FILENAME
 from book_recommender.artifacts.item_metadata import METADATA_FILENAME
 from book_recommender.config import CONTENT, ITEM_METADATA
 from book_recommender.content.tags import TAG_CLEANING_VERSION
+from book_recommender.profiling import (
+    build_semantic_profile,
+    summarize,
+)
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session, sessionmaker
 

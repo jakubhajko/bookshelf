@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import numpy as np
 import pytest
+
 from book_recommender.config import SIGNAL_WEIGHTS_DEFAULT, SignalWeights
 from book_recommender.contracts.context import (
     RatingSnapshot,
@@ -21,8 +22,7 @@ from book_recommender.contracts.context import (
     TasteSeedSnapshot,
     UserContext,
 )
-
-from book_app.modules.recommendations.semantic_profile import (
+from book_recommender.profiling import (
     build_semantic_profile,
     collect_evidence,
 )

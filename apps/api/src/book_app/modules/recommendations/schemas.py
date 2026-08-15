@@ -17,7 +17,13 @@ REASON_TEXT: dict[str, str] = {
     "SIMILAR_TO_SAVED_BOOKS": "Similar to books you've saved",
     "SIMILAR_TO_SHELF": "Similar to books on this shelf",
     "SIMILAR_TO_CURRENT_BOOK": "Similar to this book",
-    "SEMANTIC_QUERY_MATCH": "Matches your search",
+    # Not "Matches your search". R8's live smoke test showed a reader who
+    # had only completed onboarding being told their Home feed matched a
+    # search they never ran — the code is emitted for a match against an
+    # *inferred interest* (rec-spec §12.2), and search has no producer at
+    # all yet. rec-spec §21 requires the prose correspond to real evidence,
+    # and "your interests" is what the evidence actually was.
+    "SEMANTIC_QUERY_MATCH": "Based on your interests",
     "EXPLORATION": "Something different to explore",
 }
 

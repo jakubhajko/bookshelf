@@ -2391,7 +2391,105 @@ Tests (+77): 18 fusion, 22 ranking, 37 reranking.
 
 No migration, no OpenAPI change, no frontend change, no serving change.
 
-### Phases R8-R9 — not started
+### Phase R8 — Pipeline engine integration and the serving switch — **backend done, cold-start UI outstanding**
+
+**This phase is not complete.** The serving switch is done, tested and
+verified live; `RECOMMENDATION_PROVIDER=pipeline` now produces real
+personalized batches through the real routes. What remains is R8's
+frontend half: the skippable cold-start onboarding UX, the attribution
+sweep over card/modal/detail actions, and the e2e suite. Those are listed
+below as outstanding rather than quietly dropped, and the repository is at
+a clean, green boundary in the meantime.
+
+#### R8 checklist
+
+- [x] `PipelineRecommendationEngine` implemented; `FuturePipelineRecommendation-
+  Engine` deleted rather than left as unreachable code.
+- [x] Artifact-backed dependencies constructed once per provider.
+- [x] `InProcessProvider`, timeout behavior, `FallbackProvider`, persisted
+  batches and application-owned eligibility all preserved.
+- [x] No DB transaction open during inference.
+- [x] Engine order authoritative; cursor pages replay the persisted batch.
+- [x] Candidate ids still validated against the live catalog by the service.
+- [x] Reason codes truthful — and one was not, until the live run.
+- [x] Per-source provenance persisted within the existing result model.
+- [x] Provider configuration left at `mock` by default; `pipeline` opt-in.
+- [ ] Cold-start onboarding UX (skippable, keyboard accessible, loading/
+  error/empty states).
+- [ ] Attribution sweep across card, modal and detail-page actions.
+- [ ] The eight end-to-end scenarios in the phase's own test list.
+
+#### What the live run found that unit tests could not
+
+**A user-visible lie.** `SEMANTIC_QUERY_MATCH` rendered as *"Matches your
+search"*. A reader who had done nothing but complete onboarding got a Home
+feed where **every card** claimed to match a search they never ran — and
+search has no producer in the application at all. The code is emitted for a
+match against an *inferred interest* (rec-spec §12.2). It now reads "Based
+on your interests", and `apps/api/tests/test_reason_text.py` asserts prose
+cannot claim evidence its code does not carry.
+
+This is exactly the class of bug that only appears when something actually
+serves: every unit test asserted on `ReasonCode`, which was correct, and
+none of them looked at the string a reader would read.
+
+**A misleading `model_version`.** The first implementation reused the
+popularity artifact's version, which put an authoritative-looking timestamp
+in `recommendation_requests.model_version` that was wrong about five sixths
+of what produced the batch. It is now `pipeline-<digest>` over every
+contributing artifact version, with the full mapping in diagnostics
+(ADR-0025).
+
+#### Serving, measured (§5q)
+
+```text
+cold start (no evidence)      1001 ms   all POPULAR_WITH_READERS
+after 5 onboarding seeds       463 ms   Tolkien, Dune, PKD, Gibson, Ender's Game
+similar to 'Dune'              261 ms   Dune Messiah, Children of Dune, Heretics
+cursor page 2                    6 ms   replays the persisted batch, no inference
+```
+
+The cold-start page and the seeded page share **1 of 12** results — five
+taste seeds and nothing else visibly change the feed, which is ADR-0019's
+entire argument for taste seeds being real domain state.
+
+The first number is inflated: the provider is built lazily on first use, so
+that request also paid ~1 s of artifact loading (risk #121).
+
+#### Decisions worth recording (ADR-0025)
+
+- **Semantic profiling moved into `packages/recommender`** unchanged. It
+  never imported FastAPI or SQLAlchemy, which is what made it movable, and
+  the move makes rec-spec §13's "inspection must reuse the same profiling
+  code" true by construction rather than by convention.
+- **Every artifact is optional at startup.** A generator built with `None`
+  reports `NO_ARTIFACT`, so degradation is visible in diagnostics rather
+  than looking like an empty result. A process that will not boot because
+  one artifact is stale is worse than one serving popularity.
+- **Content and ALS are memory-mapped in serving**, acting on R5's
+  measurement (risk #106) rather than leaving it as a note.
+- **The engine owns the source-book exclusion** — a product rule about the
+  surface, not a property of any retrieval mechanism.
+
+#### Changed files (R8)
+
+- `packages/recommender/.../engines/pipeline.py` — new.
+- `packages/recommender/.../profiling/semantic.py` — moved from `apps/api`.
+- `packages/recommender/.../engines/future_pipeline.py` — deleted.
+- `apps/api/.../recommendations/wiring.py` — builds the pipeline.
+- `apps/api/.../recommendations/schemas.py` — the reason-prose fix.
+- `apps/api/src/book_app/core/config.py` — `pipeline` replaces
+  `future_pipeline`.
+- `apps/api/tests/test_reason_text.py` — new.
+- `docs/adr/0025-pipeline-serving-switch.md` — new.
+
+Tests: +34 engine, +6 reason prose, +1 integration wiring; 10 profiling
+tests moved from `apps/api` to `packages/recommender` with their module.
+
+No migration, no OpenAPI change, no frontend change **yet** — the frontend
+work is the outstanding half.
+
+### Phase R9 — not started
 
 Scope, tasks and per-phase acceptance criteria live in
 `RECOMMENDER_IMPLEMENTATION_PLAN.md` and are not duplicated here. Each phase
@@ -3810,6 +3908,90 @@ RRF is chosen for rewarding agreement between independent mechanisms
 order is driven overwhelmingly by within-generator rank times a surface
 weight. Risk #119.
 
+## 5q. Recommender Phase R8 validation commands and results
+
+### Gates
+
+```bash
+make test
+#   apps/api             208 passed   (was 212: -10 profiling tests moved out, +6 reason prose)
+#   packages/recommender 454 passed   (was 411: +10 moved, +34 engine, -1 deleted placeholder)
+#   apps/web              93 passed   (unchanged — the frontend half is outstanding)
+make lint        # clean
+make typecheck   # clean: 138 + 72 source files, tsc -b
+uv run --project apps/api pytest tests/integration -q
+#                        207 passed   (was 206: +1 pipeline-with-no-artifacts)
+```
+
+No migration and no OpenAPI change: the pipeline reuses the existing
+`recommendation_results` columns, and reason prose is response *content*,
+not schema. `make e2e` is part of the outstanding frontend half.
+
+### Live serving smoke test
+
+Real dev database, real 92,524-book artifacts, the actual FastAPI app with
+`RECOMMENDATION_PROVIDER=pipeline`, over HTTP. A fresh user is registered,
+seeded and deleted by the script.
+
+```text
+pipeline_engine_built  artifacts=[content, item_metadata, als, item_cf,
+                                  source_similarity, popularity]  generators=5
+                       content and als loaded with mmap
+
+COLD START                     1001 ms   12 items
+   'Toda Mafalda'                            POPULAR_WITH_READERS
+   "It's a Magical World: A Calvin and Hobbes…"  POPULAR_WITH_READERS
+
+AFTER 5 ONBOARDING TASTE SEEDS  463 ms   12 items
+   'The Return of the King'                  Based on your interests
+   'Dune Messiah (Dune Chronicles #2)'       Based on your interests
+   'The Silmarillion'                        Based on your interests
+   'The Philip K. Dick Reader'               Based on your interests
+   'Count Zero (Sprawl, #2)'                 Based on your interests
+   "Ender's Game (Ender's Saga, #1)"         Based on your interests
+   overlap with the cold-start page: 1/12
+
+SIMILAR to #58203 'Dune'        261 ms
+   'Dune Messiah'  'Children of Dune'  'Heretics of Dune'
+   'This Alien Shore'  'God Emperor of Dune'  'A Deepness in the Sky'
+   all SIMILAR_TO_CURRENT_BOOK; the source book is absent
+
+CURSOR PAGE 2                     6 ms   disjoint from page 1, idempotent on refetch
+```
+
+The seeds were five books (Dune, The Hobbit, The Fellowship of the Ring,
+Neuromancer, Blade Runner) and nothing else — no ratings, no shelves. One
+of twelve cold-start results survives into the seeded page.
+
+### What was persisted
+
+```text
+recommendation_requests
+  surface=home  model=pipeline  version=pipeline-9adec91b77b2
+  provider=in_process  fallback_used=False
+
+recommendation_results (sampled)
+  0. book=50373  sources=[item_cf,als,semantic,popularity]  4 source rows
+  1. book=58189  sources=[als,item_cf,semantic]             3 source rows
+  2. book=56734  sources=[semantic,als]                     2 source rows
+  rows with more than one candidate source: 13
+```
+
+`candidate_sources` is plural in the database, and each row's `diagnostics`
+carries every contributing source with its `generator`, `rank`, `score` and
+`rrf` contribution — rec-spec §17's four required fields, asserted by the
+script rather than eyeballed. `fallback_used=False` confirms the pipeline
+itself produced the batch rather than degrading to popularity.
+
+### Degradation, tested rather than assumed
+
+Every artifact family was dropped in turn and the engine still produced a
+batch (6 parametrized cases); with *all six* missing it returns an empty
+result rather than raising, which is what lets the provider's popularity
+fallback cover it. A generator made to raise is isolated and reported as
+`failed` while the batch completes. The wiring builds successfully against
+an empty artifact directory.
+
 ## 6. Risks and assumptions
 
 Recorded per CLAUDE.md: "For a genuinely unspecified detail, choose a
@@ -4978,59 +5160,77 @@ conservative, reversible default and document it."
      the strongest RRF weight nor the dominant ranking feature), but "not
      obviously wrong" is the current standard for the rest.
 
+### Recommender Phase R8
+
+121. **The provider is built lazily, so the first request after a boot pays
+     ~1 s of artifact loading.** Pre-existing behaviour that R8 made
+     expensive — there was one small artifact to load before, and there are
+     six large ones now. Inside the ~5 s provider timeout, but it is a cold
+     first request for every worker after every deploy, and it lands on a
+     real reader. Building the provider during application startup instead
+     is a small change; it was not made in R8 because it alters startup
+     behaviour for `mock` and `popularity` too and deserves its own pass.
+122. **`RECOMMENDATION_PROVIDER` still defaults to `mock`.** The pipeline
+     works and is verified, but nothing has flipped the default — the
+     implementation plan asks for that only "after all required artifacts
+     and tests are ready", and R8's own frontend half is not. Whoever flips
+     it should know the switch is a one-line settings change and that
+     `.env`/`.env.example` both still say `mock`.
+123. **Reason prose is presentational and now demonstrably load-bearing.**
+     One string was wrong for every reader on Home, and no unit test caught
+     it because they all asserted on `ReasonCode`. There is now a test that
+     the prose cannot claim evidence its code does not carry, but it is a
+     blocklist of words — it would not catch a *new* code whose prose is
+     subtly wrong, and there is no test that renders a real batch and reads
+     the strings.
+124. **`BASED_ON_HIGH_RATINGS` vs `SIMILAR_TO_SAVED_BOOKS` is chosen from
+     counts, not from the candidate.** The CF generators do not report
+     *which* seed produced a candidate, so the engine picks the reason from
+     whichever evidence type the reader has more of. It is truthful at the
+     level of "this is what drove the fold-in" and it is not per-candidate
+     truth. Making it exact means threading seed attribution through
+     `candidates_from_seeds` and the ALS fold-in, which is R9 work at best.
+125. **Nothing has measured per-worker memory with mmap in a serving
+     process.** R5 measured it in a script (823 MB with mmap, 1,020 MB
+     without). Serving takes the mmap path on the strength of that
+     measurement, but a live worker under load has not been profiled, and
+     mmap trades resident memory for page faults on a matrix that every
+     semantic query touches in full.
+
 ## 7. Next phase
 
-**Recommender Phase R8 — pipeline engine integration, cold-start UI and the
-serving switch.** Scope and acceptance criteria are in
-`RECOMMENDER_IMPLEMENTATION_PLAN.md`. ADR-0023 defines the generator
-contract, ADR-0017 and ADR-0024 the fusion/ranking/reranking R8 wires up,
-and ADR-0006/ADR-0007 the provider seam and persistence it must respect.
+**Finish Recommender Phase R8 — the cold-start onboarding UX, the
+attribution sweep and the end-to-end suite.** R8's backend half is done and
+verified (§5q); its frontend half is not started. Scope is in
+`RECOMMENDER_IMPLEMENTATION_PLAN.md` under Phase 8, and ADR-0019 governs
+what taste seeds are and are not.
 
-**R8 is the phase that changes what a reader sees.** Everything below it now
-exists, is tested in isolation, and has been run end to end against the real
-artifacts (§5p) — but `wiring.py` still loads only popularity, and
-`FuturePipelineRecommendationEngine` is still the placeholder that raises.
-R8 replaces it, which means R8 is the first phase since R2 whose bugs are
-visible to a user.
+Everything the UI needs already exists on the server:
 
-What R8 has to connect:
-
-| Stage | What exists |
+| Need | What exists |
 |---|---|
-| context | `build_user_context` + `build_semantic_profile(...).combined()` |
-| generators | five, behind `CandidateGenerator` (R6) |
-| fusion | `fuse(results, surface=...)` (R7) |
-| ranking | `DeterministicRanker` + `RankingContext` (R7) |
-| reranking | `DiversityReranker` + `RerankContext` (R7) |
-| surfaces | `HOME_SURFACE`, `SHELF_SURFACE`, `SIMILAR_SURFACE` |
+| read/write taste seeds | `GET`/`PUT /api/v1/me/taste-seeds` (R2) |
+| book search for the picker | `/api/v1/books/search` and the existing cards |
+| personalized Home immediately | verified live: 5 seeds change 11 of 12 results |
 
-Five things R8 should keep in view, all recorded above with evidence:
+Four things that pass should keep in view:
 
-- **Memory, not latency, is the binding constraint.** A full Home request is
-  ~97 ms against a ~5 s timeout, but all six artifact families cost
-  ~1.0-1.2 GB per worker (risk #106). `load_content_artifact(mmap=True)`
-  saves ~181 MB of that at no load-time cost and is still not the default —
-  R8 owns that decision, because R8 is what loads them for real.
-- **The ranker and reranker need context the engine must assemble**: query
-  vectors from the semantic profile, negative evidence from Not-Interested
-  and low ratings, coherent genres/authors per surface, and
-  `reference_book_ids` on Similar. Skipping any of them silently disables a
-  feature rather than failing — Similar Books without `reference_book_ids`
-  is how `'Dune *'` reached rank 10 (ADR-0024).
-- **No open DB transaction during inference** (CLAUDE.md), and the context
-  must be built before the read transaction ends. The smoke test disposes
-  the engine before running the pipeline for exactly this reason.
-- **Engine order is authoritative and gets persisted** (ADR-0006,
-  ADR-0007). Nothing downstream may re-sort. `candidate_sources` stays
-  plural, and per-source rank/score/contribution must survive into
-  `recommendation_results` without putting a diagnostics blob on all 60
-  rows (ADR-0017).
-- **Popularity must remain a working fallback at every step** (rec-spec
-  §27). It is the one generator that produces candidates for a reader with
-  no evidence at all, and the standalone `PopularityRecommendationEngine`
-  still exists behind the provider for when the pipeline itself cannot run.
+- **Do not force ratings or shelves.** rec-spec §6 and ADR-0019: taste
+  seeds are their own domain state, not fake ratings and not fake saves.
+  The onboarding must be skippable and completable below the suggested
+  3-10 selections.
+- **The reason prose is user-visible and was wrong once.** Anything the UI
+  renders from a reason code should be read against what the reader
+  actually did (risk #123).
+- **The e2e list in the phase is eight scenarios**, including "provider
+  failure degrades to popularity" and "no endpoint returns duplicates or
+  prohibited exclusions" — both already hold in unit and integration tests,
+  but not yet through a browser.
+- **`RECOMMENDATION_PROVIDER` is still `mock`.** The e2e suite will need it
+  set to `pipeline` to exercise anything R8 built (risk #122).
 
-R8 has not been started. Do not begin it as part of an R7 pass.
+After that, **R9** — evaluation, performance hardening, diagnostics and
+documentation — is the last phase in the implementation plan.
 
 **The drift-item ledger stayed closed, and R7 emptied one entry from it.**
 R4 emptied it; R5 and R6 added none. R7 fixed a defect its own live run
