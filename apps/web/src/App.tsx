@@ -14,6 +14,7 @@ import { HomePage } from './routes/Home'
 import { LoginPage } from './routes/Login'
 import { NotFoundPage } from './routes/NotFound'
 import { RatedPage } from './routes/Rated'
+import { OnboardingPage } from './routes/Onboarding'
 import { RegisterPage } from './routes/Register'
 import { SearchPage } from './routes/Search'
 import { ShelfBooksPage } from './routes/ShelfBooks'
@@ -49,6 +50,12 @@ export function AppRoutes() {
         </Route>
 
         <Route element={<RequireAuth />}>
+          {/* Outside `AppShell` on purpose: onboarding is a full-page
+            * first-run task, and the sidebar's Home/Shelves/Rated links
+            * would invite the reader to wander off mid-task without the
+            * page having said what skipping does. "Skip for now" is the
+            * way out, and it is always available. */}
+          <Route path="/welcome" element={<OnboardingPage />} />
           <Route element={<AppShell />}>
             <Route path="/" element={<HomePage />} />
             <Route path="/search" element={<SearchPage />} />

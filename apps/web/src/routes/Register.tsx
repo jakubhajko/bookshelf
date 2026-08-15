@@ -22,7 +22,7 @@ export function RegisterPage() {
       await register({ username, password, passwordConfirmation })
       // Registration doesn't establish a session (spec §13.5 treats
       // register/login as separate steps) — send them to log in next.
-      await navigate('/login', { state: { justRegistered: true } })
+      await navigate('/login', { state: { justRegistered: true, onboard: true } })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Something went wrong. Please try again.')
     } finally {

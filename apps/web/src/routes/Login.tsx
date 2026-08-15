@@ -7,6 +7,12 @@ import { TextField } from '../components/TextField'
 interface LoginLocationState {
   from?: { pathname: string }
   justRegistered?: boolean
+  /** Set by `Register` so a brand-new reader lands on taste selection
+   * instead of an unpersonalized Home. Only ever set on the hop straight
+   * from registration, so returning readers are never sent back through
+   * onboarding — and `from` still wins, because someone deep-linked to a
+   * page and bounced to login wanted *that* page. */
+  onboard?: boolean
 }
 
 export function LoginPage() {
@@ -26,7 +32,8 @@ export function LoginPage() {
     setIsSubmitting(true)
     try {
       await login({ username, password })
-      await navigate(state.from?.pathname ?? '/', { replace: true })
+      const next = state.from?.pathname ?? (state.onboard ? '/welcome' : '/')
+      await navigate(next, { replace: true })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Something went wrong. Please try again.')
     } finally {

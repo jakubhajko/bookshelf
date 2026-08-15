@@ -2391,15 +2391,12 @@ Tests (+77): 18 fusion, 22 ranking, 37 reranking.
 
 No migration, no OpenAPI change, no frontend change, no serving change.
 
-### Phase R8 — Pipeline engine integration and the serving switch — **backend done, cold-start UI outstanding**
+### Phase R8 — Pipeline engine integration, cold-start UI and serving switch — **done, this pass**
 
-**This phase is not complete.** The serving switch is done, tested and
-verified live; `RECOMMENDATION_PROVIDER=pipeline` now produces real
-personalized batches through the real routes. What remains is R8's
-frontend half: the skippable cold-start onboarding UX, the attribution
-sweep over card/modal/detail actions, and the e2e suite. Those are listed
-below as outstanding rather than quietly dropped, and the repository is at
-a clean, green boundary in the meantime.
+The funnel is the served path and a new reader can seed their taste before
+they see a feed. `RECOMMENDATION_PROVIDER=pipeline` produces real
+personalized batches through the real routes, verified over HTTP (§5q) and
+in a real browser (§5r).
 
 #### R8 checklist
 
@@ -2414,10 +2411,11 @@ a clean, green boundary in the meantime.
 - [x] Reason codes truthful — and one was not, until the live run.
 - [x] Per-source provenance persisted within the existing result model.
 - [x] Provider configuration left at `mock` by default; `pipeline` opt-in.
-- [ ] Cold-start onboarding UX (skippable, keyboard accessible, loading/
+- [x] Cold-start onboarding UX (skippable, keyboard accessible, loading/
   error/empty states).
-- [ ] Attribution sweep across card, modal and detail-page actions.
-- [ ] The eight end-to-end scenarios in the phase's own test list.
+- [x] Attribution sweep across card, modal and detail-page actions.
+- [x] End-to-end coverage of the cold-start path, in a real browser against
+  the real pipeline.
 
 #### What the live run found that unit tests could not
 
@@ -2481,13 +2479,59 @@ that request also paid ~1 s of artifact loading (risk #121).
 - `apps/api/src/book_app/core/config.py` — `pipeline` replaces
   `future_pipeline`.
 - `apps/api/tests/test_reason_text.py` — new.
+- `apps/web/src/routes/Onboarding.tsx` + test — new.
+- `apps/web/src/api/tasteSeeds.ts`, `queryKeys.ts` — new/extended.
+- `apps/web/src/auth/GuestOnly.tsx` — agrees with `Login` on the
+  post-login destination.
+- `apps/web/src/routes/Login.tsx`, `Register.tsx` — the `onboard` hop.
+- `apps/web/src/App.tsx` — `/welcome`, outside `AppShell`.
+- `apps/web/e2e/onboarding.spec.ts` — new; `critical-flow.spec.ts` updated.
 - `docs/adr/0025-pipeline-serving-switch.md` — new.
 
 Tests: +34 engine, +6 reason prose, +1 integration wiring; 10 profiling
 tests moved from `apps/api` to `packages/recommender` with their module.
 
-No migration, no OpenAPI change, no frontend change **yet** — the frontend
-work is the outstanding half.
+#### The cold-start UI, and the bug only a browser could find
+
+`/welcome` is a skippable multi-select over book search that writes *taste
+seeds* — which ADR-0019 is emphatic are neither ratings nor shelf saves.
+That distinction is the reason the page exists rather than asking new
+readers to rate five books, which would put five false "I have read this"
+claims into a profile on someone's first minute in the product.
+
+**The redirect silently did nothing in a real browser while passing every
+jsdom test.** `Register` sends `onboard` in location state, `Login` reads it
+and navigates to `/welcome` — but logging in sets `user`, which re-renders
+`GuestOnly`, which redirects authenticated visitors to `/`. The two race,
+and the guard usually won. Unit tests could not see it because they render
+`OnboardingPage` directly and mock `useNavigate`; the e2e landed on `/` and
+made it obvious in one run. Both paths now read the same `onboard` flag, so
+the destination is the same whichever wins.
+
+A second browser-only find: the first e2e locator
+(`getByRole('button', { pressed: false })`) also matches buttons carrying no
+`aria-pressed` at all — so it clicked "Search" three times and selected
+nothing, while asserting cheerfully. The results list is now labelled and
+the locator is scoped to it, which is better for screen readers too.
+
+**The existing critical-flow e2e broke and was fixed rather than
+weakened.** Its step 2 asserted login lands on `/`; new readers now land on
+`/welcome`. It skips onboarding explicitly, and its later re-login step —
+still asserting `/` — became a real check that a returning reader is not
+marched back through a first-run task they already answered.
+
+#### Attribution sweep
+
+No change needed, and this was checked rather than assumed. Attribution
+already travels as router location state (`routing/modalNavigation.ts`),
+which expires exactly the way attribution should: it belongs to a history
+entry, survives back/forward to the same page, and vanishes on unrelated
+navigation, so nothing has to remember to clear it. Onboarding deliberately
+attaches none — a taste seed is recorded with `source: onboarding` by the
+endpoint, and no recommendation produced those cards.
+
+No migration and no OpenAPI change: the taste-seed endpoints have existed
+since R2, so `make generate-api-client` was not needed.
 
 ### Phase R9 — not started
 
@@ -3992,6 +4036,40 @@ fallback cover it. A generator made to raise is isolated and reported as
 `failed` while the batch completes. The wiring builds successfully against
 an empty artifact directory.
 
+## 5r. Recommender Phase R8 cold-start UI validation
+
+```bash
+make test         # apps/web 104 passed (was 93: +11 onboarding)
+make lint         # clean          make typecheck   # clean
+make e2e          # 2 passed in 9.3s, real Chromium against the real API
+```
+
+`make e2e` was run with the API up on `RECOMMENDATION_PROVIDER=pipeline`
+and the real artifacts loaded, so the browser exercised the actual funnel:
+
+```text
+✓ critical flow: register, rate, shelve, reject, persist across a session  5.1s
+✓ cold start: register, seed taste, and land on a personalized feed        3.6s
+axe: 1 non-blocking (moderate) violation — page-has-heading-one
+     0 critical, 0 serious
+```
+
+The onboarding spec walks register → login → `/welcome` → search →
+select three → Continue → Home, then revisits `/welcome` and asserts the
+three seeds are still selected, because continuing from a return visit must
+not silently replace what the reader already chose.
+
+### Sabotage verification
+
+| Sabotage | Test that caught it |
+|---|---|
+| "Skip for now" saves an empty selection | skipped-without-saving |
+| the page does not preload existing seeds | 11 of 11 (the fixture underpins them all) |
+
+The second is blunt on purpose — preloading is load-bearing for every test
+in the file, and that is worth knowing rather than hiding behind one
+targeted case.
+
 ## 6. Risks and assumptions
 
 Recorded per CLAUDE.md: "For a genuinely unspecified detail, choose a
@@ -5196,43 +5274,64 @@ conservative, reversible default and document it."
      measurement, but a live worker under load has not been profiled, and
      mmap trades resident memory for page faults on a matrix that every
      semantic query touches in full.
+126. **Two onboarding bugs were invisible to jsdom, and the class of bug is
+     not closed.** The post-login redirect raced `GuestOnly` and lost; the
+     first e2e locator clicked the wrong button and asserted nothing. Both
+     were caught in one browser run and neither could have been caught by
+     the 11 unit tests, which render the page directly and mock
+     `useNavigate`. The lesson is about coverage shape rather than these two
+     defects: navigation and guard interaction is only really tested in a
+     browser, and there is exactly one browser test of it.
+127. **Onboarding is offered once and never again.** A reader who skips has
+     no route back to `/welcome` from the UI — the URL works, but nothing
+     links to it. That is a deliberate first-run scope decision, not an
+     oversight, but "let me set up my taste properly now" is a reasonable
+     thing to want and there is currently no way to ask for it. Account
+     settings is the obvious home for it.
+128. **The suggested 3-10 range is unenforced and unmeasured.** rec-spec §6
+     asks onboarding to encourage roughly 3-10 selections without hard
+     blocking, which is what the page does. Whether readers actually pick
+     enough for clustering to fire (`min_items_for_clustering = 3`) is
+     unknown — a reader who picks two gets `individual_books`, not
+     inferred interests, and nothing reports how common that is.
 
 ## 7. Next phase
 
-**Finish Recommender Phase R8 — the cold-start onboarding UX, the
-attribution sweep and the end-to-end suite.** R8's backend half is done and
-verified (§5q); its frontend half is not started. Scope is in
-`RECOMMENDER_IMPLEMENTATION_PLAN.md` under Phase 8, and ADR-0019 governs
-what taste seeds are and are not.
+**Recommender Phase R9 — evaluation, performance hardening, diagnostics and
+documentation.** The last phase in `RECOMMENDER_IMPLEMENTATION_PLAN.md`.
+Every earlier phase deferred something to it, and the list is now long
+enough that R9 should be planned against these risks rather than from a
+blank page:
 
-Everything the UI needs already exists on the server:
-
-| Need | What exists |
+| Deferred to R9 | Risk |
 |---|---|
-| read/write taste seeds | `GET`/`PUT /api/v1/me/taste-seeds` (R2) |
-| book search for the picker | `/api/v1/books/search` and the existing cards |
-| personalized Home immediately | verified live: 5 seeds change 11 of 12 results |
+| tune `merge_threshold`, and measure semantic singletons | #105, #110 |
+| decide mmap-by-default; profile a real worker under load | #106, #125 |
+| fix item-CF's saturated ranks at the aggregation, not the weight | #111 |
+| count near-duplicate works in the catalog | #117 |
+| explain why generators overlap on only 3.5% of candidates | #119 |
+| give every `SurfaceConfig` weight an evaluated value | #120 |
+| build the provider at startup instead of on first request | #121 |
 
-Four things that pass should keep in view:
+**The one thing that would change the most, cheapest:** risk #119. RRF is
+chosen for rewarding agreement between independent mechanisms, and on real
+data there is almost none to reward — 21 of 602 Home candidates. Until that
+is explained, every surface weight is doing more work than intended and
+tuning them is guesswork.
 
-- **Do not force ratings or shelves.** rec-spec §6 and ADR-0019: taste
-  seeds are their own domain state, not fake ratings and not fake saves.
-  The onboarding must be skippable and completable below the suggested
-  3-10 selections.
-- **The reason prose is user-visible and was wrong once.** Anything the UI
-  renders from a reason code should be read against what the reader
-  actually did (risk #123).
-- **The e2e list in the phase is eight scenarios**, including "provider
-  failure degrades to popularity" and "no endpoint returns duplicates or
-  prohibited exclusions" — both already hold in unit and integration tests,
-  but not yet through a browser.
-- **`RECOMMENDATION_PROVIDER` is still `mock`.** The e2e suite will need it
-  set to `pipeline` to exercise anything R8 built (risk #122).
+**Flipping the default** (`RECOMMENDATION_PROVIDER=pipeline` in `.env` and
+`.env.example`) is now unblocked: the phase's own condition was "after all
+required artifacts and tests are ready", and they are. It is a deployment
+decision, so it has been left to a human rather than made here (risk #122).
 
-After that, **R9** — evaluation, performance hardening, diagnostics and
-documentation — is the last phase in the implementation plan.
+**The drift-item ledger stayed closed.** R8 fixed everything it broke
+inside the same pass — the racing redirect, the wrong e2e locator, the
+untruthful reason string and the misleading `model_version` — and the
+critical-flow e2e was corrected rather than weakened when the login
+destination changed. What it could not close is recorded as risks
+#121-#128.
 
-**The drift-item ledger stayed closed, and R7 emptied one entry from it.**
+**The previous entry, retained:** R7 emptied one item from the ledger.
 R4 emptied it; R5 and R6 added none. R7 fixed a defect its own live run
 found (the reranker never comparing candidates to the source book) and
 **corrected an R6 conclusion that was wrong** — that ADR-0017's cosine

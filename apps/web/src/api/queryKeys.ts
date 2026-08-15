@@ -37,4 +37,7 @@ export const queryKeys = {
   search: {
     results: (query: string) => ['search', 'results', query] as const,
   },
+  tasteSeeds: {
+    list: ['tasteSeeds'] as const,
+  },
 } as const

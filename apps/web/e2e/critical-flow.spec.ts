@@ -70,10 +70,19 @@ test('critical flow: register, rate, shelve, reject, and persist across a sessio
     await expect(page.getByText('Account created. Log in to continue.')).toBeVisible()
   })
 
-  await test.step('2. login', async () => {
+  await test.step('2. login, then skip onboarding', async () => {
     await page.getByLabel('Username').fill(username)
     await page.getByLabel('Password').fill(password)
     await page.getByRole('button', { name: 'Log in' }).click()
+
+    // A reader arriving straight from registration lands on cold-start
+    // taste selection (R8), not on Home. Skipping is always available and
+    // is what this flow does — the onboarding path itself is covered by
+    // its own test below.
+    await expect(page).toHaveURL(/\/welcome$/)
+    await assertNoSeriousViolations(page)
+    await page.getByRole('button', { name: 'Skip for now' }).click()
+
     await expect(page).toHaveURL(/\/$/)
     await expect(page.getByRole('button', { name: `Account menu for ${username}` })).toBeVisible()
   })
@@ -194,6 +203,9 @@ test('critical flow: register, rate, shelve, reject, and persist across a sessio
     await page.getByLabel('Username').fill(username)
     await page.getByLabel('Password').fill(password)
     await page.getByRole('button', { name: 'Log in' }).click()
+    // Home, not `/welcome`: onboarding is offered on the hop straight from
+    // registration and never again, so a returning reader is not marched
+    // back through a first-run task they already answered.
     await expect(page).toHaveURL(/\/$/)
   })
 
