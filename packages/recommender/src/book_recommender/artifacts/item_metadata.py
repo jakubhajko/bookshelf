@@ -23,7 +23,7 @@ just add an indirection to the same bytes.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -104,6 +104,20 @@ class ItemMetadataTable:
             genre=self._genres[row],
             tags=self._tags[row],
         )
+
+    def rows(self) -> Iterator[ItemMetadataRow]:
+        """Every row, in artifact order.
+
+        Whole-catalog iteration is a diagnostic need, not a serving one —
+        the pipeline only ever looks books up by id. It lives here rather
+        than as a private-attribute walk in the evaluation package so that
+        the artifact's internal layout stays internal (rec-spec §23.3's
+        counting work needs the rows; it does not need the columns).
+        """
+        for book_id in self._book_ids:
+            row = self.get(int(book_id))
+            if row is not None:
+                yield row
 
     def genre_of(self, book_id: int) -> str | None:
         """The single field the surface reranker needs per candidate

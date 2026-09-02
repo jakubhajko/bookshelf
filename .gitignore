@@ -36,6 +36,8 @@ apps/web/.vite/
 apps/web/coverage/
 apps/web/playwright-report/
 apps/web/test-results/
+# Playwright run from the repo root instead of apps/web/ lands here:
+/test-results/
 *.tsbuildinfo
 
 # Generated API client (Phase 6+) — regeneratable via `make generate-api-client`:

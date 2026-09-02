@@ -72,7 +72,13 @@ ITEM_CF = ArtifactFamily(
     name="item_cf",
     directory="item_cf/latest",
     # Sparse item-item nearest neighbours over the same positive-only matrix.
-    preprocessing_version="item-cf-topk-v1",
+    #
+    # v2 (R9): identical similarity values, different row *order*. Ties are
+    # broken by co-occurrence support before the column index, because 10.37%
+    # of v1's edges scored exactly 1.0 and the runtime reads row position as
+    # rank (risk #111). The numbers did not change; what a rank *means* did,
+    # which is precisely what this field exists to say.
+    preprocessing_version="item-cf-topk-v2",
 )
 
 CONTENT = ArtifactFamily(
@@ -237,17 +243,55 @@ class ItemCfConfig:
     #: popular items are discounted.
     bm25_k1: float = 1.2
     bm25_b: float = 0.75
+    #: Minimum number of readers who touched **both** items for an edge to
+    #: be kept (risk #111).
+    #:
+    #: 1 admits every edge, which is what v1 did. The consequence was
+    #: measured rather than predicted: 10.37% of v1's edges scored exactly
+    #: 1.0, and sampling the live matrix showed every one of those tie
+    #: groups to be items with a single reader each — two books that one
+    #: person happened to own, which cosine calls a perfect match and BM25
+    #: cannot discount, because the match really is structurally perfect.
+    #: Rank order inside those groups was catalog insertion order, and RRF
+    #: reads rank as evidence (ADR-0017).
+    #:
+    #: The value was chosen by the offline sweep on held-out data
+    #: (plan.md §5s), and the sweep is unusually clear about it:
+    #:
+    #: ====== ======== ========= ======== =====
+    #: config ndcg@50  recall@50 coverage gini
+    #: ====== ======== ========= ======== =====
+    #: s1     0.0258   0.0420    0.547    0.374
+    #: s2     0.0450   0.0733    0.325    0.456
+    #: s3     0.0565   0.0944    0.194    0.511
+    #: ====== ======== ========= ======== =====
+    #:
+    #: This is the first time rec-spec §10's two criteria — offline metrics
+    #: and coverage/popularity behaviour — have disagreed. Accuracy more
+    #: than doubles while catalog coverage falls by two thirds, and the
+    #: tiebreaker is what item-CF is *for*: four other generators supply
+    #: breadth (semantic alone spans the whole catalog), and only this one
+    #: supplies "readers who liked X also liked Y". Trustworthy behavioural
+    #: evidence beats broad behavioural evidence when breadth is already
+    #: covered — and RRF rewards agreement, which noisy candidates cannot
+    #: earn. Measured end to end rather than argued: on the live reader,
+    #: Home's largest tie group fell from 74 to 2 and cross-generator
+    #: agreement rose from 12.4x to 19.5x chance, with every surface still
+    #: filling 60/60 including a source book with one rating.
+    min_support: int = 3
 
     @property
     def label(self) -> str:
-        return f"{self.similarity}-k{self.top_k}"
+        return f"{self.similarity}-k{self.top_k}-s{self.min_support}"
 
 
-ITEM_CF_DEFAULT = ItemCfConfig(similarity="bm25", top_k=100)
+ITEM_CF_DEFAULT = ItemCfConfig(similarity="bm25", top_k=100, min_support=3)
 
 ITEM_CF_SWEEP: tuple[ItemCfConfig, ...] = (
-    ItemCfConfig(similarity="cosine", top_k=100),
-    ItemCfConfig(similarity="bm25", top_k=100),
+    ItemCfConfig(similarity="cosine", top_k=100, min_support=1),
+    ItemCfConfig(similarity="bm25", top_k=100, min_support=1),
+    ItemCfConfig(similarity="bm25", top_k=100, min_support=2),
+    ItemCfConfig(similarity="bm25", top_k=100, min_support=3),
 )
 
 

@@ -11,7 +11,7 @@ LOCAL_PGHOST := localhost
         migrate import-data import-data-dry-run seed-demo build-popularity \
         build-source-similarity build-item-metadata build-recommender-artifacts \
         build-als build-item-cf build-content setup-training \
-        inspect-recommender-profile evaluate-content \
+        inspect-recommender-profile evaluate-content evaluate-recommender \
         test lint typecheck e2e generate-api-client
 
 help: ## Show this help
@@ -108,6 +108,10 @@ build-content: ## Build content embeddings (needs 'make setup-training'; ~96 min
 
 evaluate-content: ## Evaluate content embeddings against Goodreads edges + coherence (rec-spec §23.2)
 	cd apps/api && uv run python -m book_app.cli.evaluate_content $(ARGS)
+
+evaluate-recommender: ## Evaluate the assembled pipeline: USERNAME=<name> [ARGS="--section depth --json"]
+	@test -n "$(USERNAME)" || (echo "error: USERNAME=<name> is required" >&2; exit 1)
+	cd apps/api && uv run python -m book_app.cli.evaluate_recommender --username "$(USERNAME)" $(ARGS)
 
 inspect-recommender-profile: ## Inspect a user's semantic interest profile: USERNAME=<name> [ARGS=--json]
 	@test -n "$(USERNAME)" || (echo "error: USERNAME=<name> is required" >&2; exit 1)

@@ -188,6 +188,35 @@ def train_item_neighbors(
     inverse = sp.diags(1.0 / norms)
     normalized = (inverse @ items).tocsr()
 
+    # How many readers touched both items — the *support* behind each
+    # similarity edge.
+    #
+    # **This exists because of a measurement that overturned two earlier
+    # guesses** (risk #111). 10.37% of v1's edges scored exactly 1.0, and on
+    # the live reader that produced a tie group of 74 candidates ordered by
+    # `lexsort`'s ascending column index — catalog insertion order, handed
+    # to RRF as though it were evidence.
+    #
+    # R6 guessed the fix belonged in the runtime aggregation. It does not:
+    # within one seed's row the arbitrary order is already baked into the
+    # artifact. R9 then guessed support could *break* those ties. It cannot
+    # either, and the reason is structural — cosine is exactly 1.0 only when
+    # two items have identical reader vectors, so every member of such a tie
+    # group has identical support by construction. Sampling the live matrix
+    # settled it: every cos=1.0 group examined consisted of items with
+    # exactly **one** reader, support uniformly 1.
+    #
+    # That is what the number actually means. An edge whose entire evidence
+    # is one person having both books on their shelf is not collaborative
+    # evidence; it is a coincidence in one library, and BM25 cannot discount
+    # it because the match is structurally perfect. So support is used as a
+    # **filter** — rec-spec §10's "popularity-aware weighting ... chosen on
+    # held-out data" — with the threshold selected by the offline sweep
+    # rather than asserted here.
+    binary = normalized.copy()
+    binary.data = np.ones_like(binary.data)
+    binary_transposed = binary.T.tocsc()
+
     item_count = normalized.shape[0]
     indptr = [0]
     neighbor_indices: list[int] = []
@@ -202,26 +231,52 @@ def train_item_neighbors(
         # items. Densifying the slice would cost 380 MB per block to hold
         # mostly zeros, so the top-K selection runs on the sparse rows.
         similarity = (normalized[start:end] @ transposed).tocsr()
+        support = (binary[start:end] @ binary_transposed).tocsr()
         for offset in range(end - start):
             row_start = int(similarity.indptr[offset])
             row_end = int(similarity.indptr[offset + 1])
             columns = similarity.indices[row_start:row_end]
             values = similarity.data[row_start:row_end]
 
-            keep = (columns != start + offset) & (values > 0)
-            columns, values = columns[keep], values[keep]
+            counts = _support_for(support, offset, columns)
+            # Filtering happens *before* top-K, so a row whose strongest
+            # edges are all single-reader coincidences keeps its next
+            # hundred real ones instead of returning a short row.
+            keep = (columns != start + offset) & (values > 0) & (counts >= config.min_support)
+            columns, values, counts = columns[keep], values[keep], counts[keep]
 
             if columns.size > config.top_k:
                 partial = np.argpartition(-values, config.top_k - 1)[: config.top_k]
-                columns, values = columns[partial], values[partial]
-            # Stable sort on (-score) with ascending column order as the
-            # implicit tiebreak keeps rebuilds byte-identical.
-            order = np.lexsort((columns, -values))
+                columns, values, counts = columns[partial], values[partial], counts[partial]
+
+            # Score desc, then support desc, then ascending column as the
+            # final tiebreak so a rebuild from identical input stays
+            # byte-identical. Support cannot separate a cos=1.0 group (they
+            # share a reader set by definition), but it does order the
+            # merely-close ties below it.
+            order = np.lexsort((columns, -counts, -values))
             neighbor_indices.extend(int(index) for index in columns[order])
             scores.extend(float(value) for value in values[order])
             indptr.append(len(neighbor_indices))
 
     return indptr, neighbor_indices, scores
+
+
+def _support_for(
+    support: sp.csr_matrix, row: int, columns: npt.NDArray[np.int32]
+) -> npt.NDArray[np.float64]:
+    """Co-occurrence counts for ``columns`` of one support row.
+
+    The support product has the same sparsity pattern as the similarity
+    product — both are non-zero exactly where some reader touched both items
+    — so every requested column is present. Reading through a lookup built
+    from the row's own indices keeps this O(row) rather than O(row x kept).
+    """
+    start, end = int(support.indptr[row]), int(support.indptr[row + 1])
+    lookup = dict(
+        zip(support.indices[start:end].tolist(), support.data[start:end].tolist(), strict=True)
+    )
+    return np.array([lookup.get(int(column), 0.0) for column in columns], dtype=np.float64)
 
 
 def rank_from_neighbors(

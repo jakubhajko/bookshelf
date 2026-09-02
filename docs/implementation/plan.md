@@ -985,11 +985,15 @@ repository valid, tested and resumable.
 | R2 | Rich user context, profile version, cold-start taste seeds | done |
 | R3 | Artifact substrate, data validation, source-similarity export | done |
 | R4 | CF artifacts: ALS + item-item | done |
-| R5 | Content embeddings, multi-interest profiling, human inspection | **done, this pass** |
-| R6 | Candidate-generator framework and the five generators | not started |
-| R7 | Surface config, weighted RRF, deterministic ranking, UX reranking | not started |
-| R8 | Pipeline engine integration, cold-start UI, serving switch | not started |
-| R9 | Evaluation, performance hardening, diagnostics, documentation | not started |
+| R5 | Content embeddings, multi-interest profiling, human inspection | done |
+| R6 | Candidate-generator framework and the five generators | done |
+| R7 | Surface config, weighted RRF, deterministic ranking, UX reranking | done |
+| R8 | Pipeline engine integration, cold-start UI, serving switch | done |
+| R9 | Evaluation, performance hardening, diagnostics, documentation | **done, this pass** |
+
+*(This table had said "not started" for R6-R9 since R5 wrote it: each phase
+appended its own §5 record and none updated the summary. Corrected in R9,
+which is the last phase that can.)*
 
 ### Phase R0 — Reconcile, baseline and lock architectural decisions — **done, this pass**
 
@@ -2533,7 +2537,11 @@ endpoint, and no recommendation produced those cards.
 No migration and no OpenAPI change: the taste-seed endpoints have existed
 since R2, so `make generate-api-client` was not needed.
 
-### Phase R9 — not started
+### Phase R9 — done
+
+Evaluation, performance hardening, diagnostics and documentation. The
+validation record is §5s, the one architectural decision is ADR-0026, and
+the standing reference is `docs/architecture/recommender.md`.
 
 Scope, tasks and per-phase acceptance criteria live in
 `RECOMMENDER_IMPLEMENTATION_PLAN.md` and are not duplicated here. Each phase
@@ -4070,6 +4078,332 @@ The second is blunt on purpose — preloading is load-bearing for every test
 in the file, and that is worth knowing rather than hiding behind one
 targeted case.
 
+## 5s. Recommender Phase R9 validation commands and results
+
+### Gates
+
+```bash
+make test
+#   apps/api             195 passed, 1 skipped   (was 208 counted differently:
+#                        +3 warm-up, +3 cf-training; the skip is
+#                        test_cf_training.py, correctly skipped without the
+#                        training group)
+#   packages/recommender 471 passed              (was 454: +17 evaluation,
+#                        reranker-equivalence and item-CF tiebreak tests)
+#   apps/web             104 passed              (unchanged — no frontend work)
+make lint        # clean, all four targets
+make typecheck   # clean: 141 + 76 source files, tsc -b
+uv run --project apps/api pytest tests/integration -q
+#                        196 passed, 1 skipped   (was 207 pre-R9 numbering)
+make e2e         # 2 passed in 7.1s, real Chromium against the real API
+```
+
+`make e2e` ran with the API up on `RECOMMENDATION_PROVIDER=pipeline` and all
+six artifacts loaded. No migration, no OpenAPI change, no frontend change.
+
+**The typecheck invariant was quietly false and is now true.** `make
+typecheck` is supposed to pass *without* the training group (ADR-0021), and
+it did not: the mypy overrides listed `implicit` and `scipy` but never
+`torch` or `sentence_transformers`, which R5 introduced. Every run since R5
+happened to have the group installed, so nothing caught it. Found by
+pruning the environment with `uv sync --all-packages` before running the
+gates — which is what a fresh clone has — and fixed in `apps/api/pyproject.toml`.
+
+### risk #119 answered: the generators agree 12-32x more than chance
+
+The measurement R7 could not make. Two additions make the raw percentage
+interpretable: a **chance baseline** (five uniform independent draws of the
+same sizes from the same eligible catalog) and a **depth sweep**.
+
+```text
+Home, before R9's item-CF fix
+  fused 602   multi-source 21 (3.5%)   expected by chance 1.69   lift 12.4x
+Shelf                13 (2.5%)                          1.15   lift 11.3x
+Similar               5 (1.6%)                          0.34   lift 14.7x
+```
+
+3.5% was never evidence that RRF's premise fails. Five ~150-deep slices of a
+92,524-book catalog *cannot* intersect much: 150 x 150 / 92,524 is a quarter
+of a book per pair. Against that floor the generators agree an order of
+magnitude more often than strangers would.
+
+The depth sweep then rules out "the quotas are too shallow" as something
+worth fixing:
+
+```text
+Home   x0.5  fused  308   multi-source 16 (5.2%)   lift 35.4x
+       x1.0  fused  602                21 (3.5%)   lift 12.4x
+       x2.0  fused 1132                36 (3.2%)   lift  6.2x
+       x4.0  fused 2169                94 (4.3%)   lift  4.4x
+```
+
+Agreement is concentrated at the **head** of each generator's list: half the
+depth already holds 16 of the 21 agreements, and quadrupling depth quadruples
+the chance baseline while the observed share stays flat. Retrieving deeper
+buys candidates, not consensus — which is exactly the behaviour a fusion rule
+that rewards agreement should want.
+
+The third hypothesis — item-CF noise suppressing confirmation — turned out to
+be true as well, and fixing it (below) raised agreement further:
+
+```text
+                 before        after ADR-0026
+Home    21 (3.5%) 12.4x  ->  33 (5.7%) 19.5x
+Shelf   13 (2.5%) 11.3x  ->  31 (6.3%) 26.9x
+Similar  5 (1.6%) 14.7x  ->  11 (3.6%) 32.3x
+```
+
+**Two of the three explanations were true and are now separated.** RRF's
+consensus term fires; it was being diluted by one noisy generator.
+
+### risk #111 fixed, after two wrong theories — ADR-0026
+
+R6 predicted the saturated-rank problem could be fixed in the runtime
+aggregation. R9 measured that it cannot: the dominant tie group on the live
+reader was 74 candidates reached from a **single** seed's row, so agreement
+count is uniformly 1 and row position *is* the arbitrary order being
+complained about.
+
+The second theory — break ties by co-occurrence support — is also wrong, and
+structurally so: cosine is 1.0 only when two items have identical reader
+vectors, so support is identical across such a group by construction.
+Sampling the live matrix showed what the number means:
+
+```text
+item 8465:   1 reader,  71 neighbours at cos=1.0, support uniformly 1
+item 91736:  1 reader, 167 neighbours at cos=1.0, support uniformly 1
+item 35889:  1 reader, 228 neighbours at cos=1.0, support uniformly 1
+```
+
+A cosine of 1.0 is **one reader who owned both books and nobody else who
+owned either**. So support became a *filter* in the builder, swept on
+held-out data:
+
+```text
+config             ndcg@50  recall@50  coverage  gini
+bm25-k100-s1 (v1)   0.0258     0.0420     0.547  0.374
+bm25-k100-s2        0.0450     0.0733     0.325  0.456
+bm25-k100-s3        0.0565     0.0944     0.194  0.511   <- selected
+```
+
+Accuracy more than doubles; catalog coverage falls by two thirds. rec-spec
+§10's two criteria disagreed for the first time, and ADR-0026 records why
+accuracy wins here: four other generators supply breadth, only this one
+supplies behaviour. Verified end to end rather than argued —
+
+```text
+item-CF on Home:  57 distinct scores / 150, largest tie group 74
+              ->  149 distinct scores / 150, largest tie group 2
+```
+
+`"New Treasury of Children's Poetry"` left the feed. Home's top six are now
+Dune, Tolkien and Harry Potter, each confirmed by two or three independent
+generators. A source book with one rating still fills 60/60 on Similar Books,
+from semantic and popularity.
+
+### The reranker was 24x slower than it needed to be, at the size that ships
+
+R7 recorded the reranker as "~78 ms of a ~97 ms Home request" (risk #118).
+**That measurement was taken at `final = 20`; the service requests 60.** At
+the size that actually ships it was 452 ms of a 471 ms request.
+
+The cause was one line: `np.asarray(chosen_vectors) @ vector` rebuilt a
+(selected x 512) matrix *once per candidate per step* — ~36,000 times per
+Home batch. A candidate's duplicate penalty depends on the **maximum** cosine
+to anything selected, and a maximum over a growing set only needs its newest
+member, so one matrix-vector product per selection step replaces it. Metadata
+rows, duplicate keys, series names and vectors are now read once per
+candidate instead of once per candidate per step.
+
+```text
+                 candidates   naive     fast   speedup   output
+home                    602   450.6ms   19.0ms    23.8x   identical
+shelf                   512   375.0ms   15.9ms    23.6x   identical
+similar                 310   220.2ms    8.5ms    26.0x   identical
+```
+
+Identical means identical: same books, same order, same penalties, same
+reason strings, same exploration flags. A `ReferenceReranker` — the obvious
+implementation, kept in the test suite — pins that down over randomized
+batches.
+
+### risks #106 and #125: a real worker, profiled
+
+```text
+startup warm-up (six artifacts)     915 ms, before the app accepts traffic
+engine total (batch of 60)           37 ms
+   profile 0.4 | generate 15.6 | fuse 0.6 | rank 2.0 | rerank 18.4
+HTTP Home, sequential                56 ms median (55-66)
+HTTP Home, 8 concurrent             303 ms median, 371 ms p95, 488 ms max
+worker RSS after startup            449 MB
+worker RSS after 20 requests        673 MB
+worker RSS after 68 requests        648 MB   (flat)
+```
+
+Against rec-spec §24's ~5 s timeout. **mmap-by-default is confirmed in a
+serving process, not just in a script:** memory-mapped pages fault in over
+the first ~20 requests and then plateau at ~650 MB — well under the 978 MB
+R5 measured in a script — with no growth under concurrency. Four workers is
+~2.6 GB; they do not share the resident cost.
+
+Every batch now emits one `recommendation_batch` log line carrying these
+stage timings, generator statuses and counts. Before R9 the engine computed
+them and threw them away, because batch-level diagnostics are not persisted
+— which made the "comfortably inside the timeout" claim checkable only in a
+profiling script.
+
+### risk #117: the duplicate catalog, counted
+
+```text
+tier       groups  books  redundant  share    largest
+exact          70    145         75  0.08%          4
+edition        94    196        102  0.11%          4
+subtitle      354    874        520  0.56%         14
+unkeyable (no title or no author): 2,358
+```
+
+The problem ADR-0024 declined to fuzzy-match is **0.08-0.11% of the
+catalog**, which retroactively justifies that decision. The `subtitle` tier
+is reported as an upper bound with its false-positive class visible in the
+samples: it groups fourteen different *Doonesbury* collections and nine
+different *Doctor Who* novels as one work. It is not a rule to ship.
+
+### risks #105 and #110: `merge_threshold` swept against a real reader
+
+```text
+Jakub, 18 evidence books
+  merge  strategy      interests  clustered  singletons  largest
+  0.40   clustered             2         17           1       10
+  0.50   clustered             3         17           1        8
+  0.55   clustered             4         16           2        6   <- shipped
+  0.65   clustered             4         13           5        5
+  0.70   clustered             3         10           8        4
+```
+
+Lowering to 0.50 recovers one singleton and costs a merged interest whose
+largest cluster then holds 8 of 18 books; 0.40 puts over half the reader's
+taste into one "interest". **The shipped default survives the sweep**, which
+is a better outcome than changing it: it is now evaluated rather than
+reasoned.
+
+Clustering is **bimodal on thin evidence**, which nobody had noticed:
+
+```text
+synthetic coherent x8    single_cluster      1 interest,  0 singletons
+synthetic scattered x8   fallback_centroid   8 interests, 0 singletons
+synthetic scattered x8 @0.45  single_cluster 1 interest,  6 singletons
+```
+
+That last row is a genuine wrinkle and a new risk (#131): the fallback ladder
+only falls through to per-book centroids when **no** cluster forms, so a
+reader with one pair and six isolated books gets a profile built from the
+pair alone — 2 of 8 books represented, while a *higher* threshold represents
+all 8.
+
+### risk #120: which knobs are actually connected
+
+No engagement labels exist, so the weights cannot be fitted — the same gate
+ADR-0017 sets for the learned ranker. What R9 could establish is
+**influence**: halve each knob in turn, compare the first screen.
+
+```text
+Home (top 4 of 18)                    changed@20  mean shift
+  rrf:semantic                                 4        3.70
+  rank:fusion                                  4        2.74
+  rrf:item_cf                                  3        6.55
+  rrf:als                                      3        5.16
+Home, provably inert
+  rank:surface_coherence                       0        0.00
+  rank:negative_evidence                       0        0.00
+  rerank:near_duplicate_penalty                0        0.00
+```
+
+`rank:surface_coherence` doing nothing on Home is **by design** — the engine
+returns an empty coherent-genre set there, because a reader's whole taste is
+the point — and the measurement confirming documented behaviour is worth as
+much as one contradicting it. The other two are data-dependent for this
+reader: no Not Interested books, no low ratings, no near-duplicates in the
+pool. This is an influence measurement, not a quality one.
+
+### Hardening
+
+| check | result |
+|---|---|
+| determinism | two separate processes, identical order, scores and `model_version` on all three surfaces |
+| artifact/catalog mismatch | unchanged from R3; the degradation sweep exercises the `None` path for all six families |
+| missing artifacts | every family withheld in turn: **60/60 fill on all three surfaces every time**, only the affected generator reports `no_artifact` |
+| first-request load | now a 915 ms startup warm-up; a failed warm-up logs and falls back to the lazy path |
+| multi-worker memory | ~650 MB per worker, documented in `docs/architecture/recommender.md` §8 |
+| secrets/PII | two new log lines carry counts, statuses, ms, `request_id` — no user id, titles or vectors; the smoke test asserts persisted diagnostics carry no vectors or titles |
+| migrations | none this phase |
+
+**Recommendation persistence grows without bound, and cannot simply be
+pruned.** Measured: 540 requests -> 32,400 result rows -> 11 MB, ~21 KB per
+batch, ~90% of it `recommendation_results`. 451 of 540 requests were already
+expired and nothing deletes them. The trap is that
+`recommendation_impressions` has `ON DELETE CASCADE` from
+`recommendation_requests`, so pruning expired requests would destroy exactly
+the impression history ADR-0015 exists to accumulate. `recommendation_results`
+is the prunable part and nothing references it. Documented rather than
+implemented — new risk #130.
+
+### Two defects found by using the tooling
+
+**`--json` was not machine-readable.** Structured logs and the report shared
+stdout, so piping the output to `json.load` failed on the first log line.
+`configure_logging` now takes a stream, and the CLI sends logs to stderr when
+`--json` is set.
+
+**The startup warm-up initially broke ten integration tests.** Eager
+construction snapshots the *mock* engine's 2,000-book candidate pool at
+startup — before the fixtures insert any books. The fix is principled rather
+than a workaround: risk #121 is about artifact loading, and `mock` loads no
+artifacts, so it stays lazy. A test pins that down.
+
+### Sabotage verification
+
+| Sabotage | Caught by |
+|---|---|
+| reference books never seed the reranker's running maximum | `test_reference_books_seed_the_running_maximum` |
+| the running maximum is never updated after a selection | 8 tests, incl. 6 randomized equivalence cases |
+| item-CF drops the support filter | `test_single_reader_coincidences_are_not_neighbours` |
+| item-CF reverts to the `(-score, book_id)` key | 2 tiebreak tests |
+| the lifespan does not warm the provider | 2 of 4 warm-up tests |
+
+**The first sabotage initially caught nothing**, and that is the finding
+worth keeping. `generator_world`'s books sit at cosine ~0.74, deliberately
+below the shipped 0.92 near-duplicate threshold, so the equivalence test
+never exercised the vector path it existed to protect. The fix was a
+duplicate-sensitive surface in the *test* (threshold 0.5) rather than a
+looser fixture — the fixture's own comment warns against that — plus
+`test_the_similarity_penalty_actually_fires_in_these_fixtures`, which guards
+the guard.
+
+### Live smoke test
+
+Real HTTP, real artifacts, assertions on persisted rows rather than status
+codes. 18 checks, all passing:
+
+```text
+served by the pipeline, not the fallback        a full batch of 60 persisted
+page is the persisted prefix, in order          no duplicate books
+no seeded book recommended back                 candidate_sources plural
+per-candidate rank+rrf preserved                no vectors/titles in diagnostics
+no reason claims evidence the reader lacks      impressions logged for the page only
+cursor page replays the persisted order         similar excludes the source book
+```
+
+```text
+similar-to-Dune top 3: Dune Messiah · Children of Dune · Heretics of Dune
+multi-source rows in the persisted batch: 18/60
+reason codes present: POPULAR_WITH_READERS, SEMANTIC_QUERY_MATCH
+```
+
+The reason codes are the check that matters most: this reader has six taste
+seeds and no ratings or saves, and neither `BASED_ON_HIGH_RATINGS` nor
+`SIMILAR_TO_SAVED_BOOKS` appears. R8's user-visible untruthful-reason bug
+would have been caught here.
+
 ## 6. Risks and assumptions
 
 Recorded per CLAUDE.md: "For a genuinely unspecified detail, choose a
@@ -5138,7 +5472,8 @@ conservative, reversible default and document it."
      with catalog metadata quality rather than with how good the clustering
      was, which is worth knowing before reading a profile as a judgement on
      the model.
-110. **Semantic singletons contribute nothing to the inferred profile.** On
+110. **Semantic singletons contribute nothing to the inferred profile.**
+     **Measured in R9 (§5s) and left as designed.** On
      the first real profile ever built (§5n), 2 of 18 evidence books reach
      no interest — and both are *ratings*, the strongest signal there is.
      `min_cluster_size = 2` is correct per rec-spec §12.2 and the fallback
@@ -5151,9 +5486,26 @@ conservative, reversible default and document it."
      should not paper over this with a semantic-only surface; R9 should
      measure it.
 
+     R9 swept it: 0.55 gives 4 interests and 2 singletons of 18, and the
+     alternatives are worse in both directions — 0.50 recovers one singleton
+     by merging two interests, 0.40 puts 10 of 18 books in one "interest",
+     0.70 abandons 8. **The shipped default survives the sweep**, so it is
+     now evaluated rather than reasoned, and the singleton cost is accepted
+     rather than unknown. The clustering's *bimodality* on thin evidence is
+     the part that was genuinely surprising — see new risk #131.
+
 ### Recommender Phase R6
 
-111. **item-CF's rank is substantially arbitrary at the top, and rank is
+111. **RESOLVED in R9 (ADR-0026), after this entry's own prediction turned
+     out to be wrong.** The fix is a `min_support` filter in the *builder*,
+     not a tiebreak in the aggregation: the dominant tie group came from one
+     seed's row, where agreement is uniformly 1 and position is the arbitrary
+     order itself. A cosine of exactly 1.0 means one reader owned both books
+     and nobody else owned either. After filtering, Home's largest item-CF tie
+     group is 2 rather than 74 and cross-generator agreement rose from 12.4x
+     to 19.5x chance. Original entry follows.
+
+     **item-CF's rank is substantially arbitrary at the top, and rank is
      all RRF sees.** 788,772 of 7,606,357 edges (10.37%) have a similarity
      of exactly 1.0 and the 90th percentile is already 1.0, so aggregation
      lands large candidate groups on an identical score and the `book_id`
@@ -5203,7 +5555,14 @@ conservative, reversible default and document it."
      precisely the mechanism measured *not* to catch the case that motivated
      this (risk #112). rec-spec §27 degradation, honestly, but the
      degradation is larger than it looks.
-117. **The duplicate key is exact, and nobody has counted the duplicates.**
+117. **COUNTED in R9 (§5s): 75 books, 0.08% of the catalog.** The
+     edition-tolerant tier reaches 102 (0.11%); the subtitle tier's 520 is an
+     upper bound that visibly groups fourteen different *Doonesbury*
+     collections as one work, so it is not a rule to ship. A problem of this
+     size does not justify deduplicating at import time, which retroactively
+     supports ADR-0024. Original entry follows.
+
+     **The duplicate key is exact, and nobody has counted the duplicates.**
      `'Dune'` and `'Dune *'` collapse; `'Dune: 40th Anniversary Edition'`
      would not. Fuzzy matching was rejected as premature (ADR-0024) because
      it adds a threshold and a false-positive class to fix a problem of
@@ -5211,13 +5570,31 @@ conservative, reversible default and document it."
      cheap and has not been done** — that measurement should precede any
      decision about deduplicating at import time, which is a catalog change
      with consequences for ratings, shelves and permalinks.
-118. **The reranker is ~80% of pipeline latency.** ~78 ms of a ~97 ms Home
+118. **RESOLVED in R9 — and this entry's numbers were measured at the wrong
+     batch size.** `final = 20` was profiled; the service requests 60, where
+     the reranker was 452 ms of a 471 ms request. Maintaining the
+     near-duplicate maximum incrementally instead of rebuilding a matrix per
+     candidate per step made it 19 ms with byte-identical output (24x). Home
+     end to end is now 37 ms in-engine, 56 ms over HTTP. Original entry
+     follows.
+
+     **The reranker is ~80% of pipeline latency.** ~78 ms of a ~97 ms Home
      request, because it is greedy and re-scores every remaining candidate
      at each of 20 steps over ~600 candidates. Fine against a ~5 s budget,
      and it scales with `candidates x limit` — a larger final batch or a
      deeper pool makes it quadratic-ish. Nothing needs doing now; it is
      recorded so the first person to see a slow request looks here.
-119. **The generators barely overlap, which undermines RRF's main
+119. **ANSWERED in R9 (§5s), and the premise was wrong.** Against a chance
+     baseline the generators agree 12-15x more than independent draws of the
+     same sizes would; 3.5% is low in absolute terms because five ~150-deep
+     slices of a 92,524-book catalog cannot intersect much. Of the three
+     candidate explanations, "quotas too shallow" is *rejected* (agreement is
+     concentrated at the head; 4x depth leaves the share flat) and both
+     "genuinely complementary" and "item-CF noise" are confirmed. Removing the
+     noise raised Home agreement to 5.7% at 19.5x chance. Original entry
+     follows.
+
+     **The generators barely overlap, which undermines RRF's main
      virtue.** Only 3.5% of Home's fused candidates (21 of 602) were found
      by more than one generator; Similar is 1.0%. RRF was chosen for
      rewarding agreement between independent mechanisms (ADR-0017), and
@@ -5230,7 +5607,14 @@ conservative, reversible default and document it."
      are too shallow for the lists to intersect, the generators are genuinely
      complementary (which would be good news), or item-CF's noise means its
      candidates *should* rarely be confirmed. R9 should measure which.
-120. **Every weight in `SurfaceConfig` is reasoned, not evaluated.** The RRF
+120. **Partly addressed in R9: reasoned, and now influence-measured.** The
+     weights still cannot be *fitted* — there are no engagement labels, the
+     same gate ADR-0017 sets for the learned ranker — but §5s records which
+     knobs move the first screen and which are inert. `rrf:semantic` dominates
+     on every surface; `rank:surface_coherence` provably does nothing on Home,
+     by design. Original entry follows.
+
+     **Every weight in `SurfaceConfig` is reasoned, not evaluated.** The RRF
      weights come from rec-spec §20's word priorities, and the ranking and
      reranking weights from argument about what should matter. No labels
      exist to tune against — the same gate ADR-0017 set for the learned
@@ -5240,7 +5624,14 @@ conservative, reversible default and document it."
 
 ### Recommender Phase R8
 
-121. **The provider is built lazily, so the first request after a boot pays
+121. **RESOLVED in R9.** The ASGI lifespan warms the provider — measured at
+     915 ms in a live worker, paid before the app accepts traffic. A failed
+     warm-up logs and leaves the lazy path, because rec-spec §27 degrades
+     rather than refusing to boot. `mock` is deliberately excluded: its
+     candidate pool is a live database snapshot, and taking it earlier only
+     makes it staler. Original entry follows.
+
+     **The provider is built lazily, so the first request after a boot pays
      ~1 s of artifact loading.** Pre-existing behaviour that R8 made
      expensive — there was one small artifact to load before, and there are
      six large ones now. Inside the ~5 s provider timeout, but it is a cold
@@ -5268,7 +5659,12 @@ conservative, reversible default and document it."
      level of "this is what drove the fold-in" and it is not per-candidate
      truth. Making it exact means threading seed attribution through
      `candidates_from_seeds` and the ALS fold-in, which is R9 work at best.
-125. **Nothing has measured per-worker memory with mmap in a serving
+125. **RESOLVED in R9.** A live worker under 8-way concurrent load settles
+     at ~650 MB after its mapped pages fault in over the first ~20 requests,
+     with no growth thereafter and p95 latency of 371 ms. mmap-by-default is
+     confirmed rather than assumed. Original entry follows.
+
+     **Nothing has measured per-worker memory with mmap in a serving
      process.** R5 measured it in a script (823 MB with mmap, 1,020 MB
      without). Serving takes the mmap path on the strength of that
      measurement, but a live worker under load has not been profiled, and
@@ -5295,51 +5691,107 @@ conservative, reversible default and document it."
      unknown — a reader who picks two gets `individual_books`, not
      inferred interests, and nothing reports how common that is.
 
+### Recommender Phase R9
+
+129. **`min_support = 3` leaves 67% of the catalog without item-CF
+     neighbours.** 30,599 items of 92,524 have a row, down from a much
+     broader v1. Every surface still fills 60/60 because semantic retrieval
+     spans the whole catalog, and a one-rating source book was checked
+     explicitly (§5s) — but item-CF is now a *precision* generator rather
+     than a coverage one, which inverts the reason R6 admitted it. If a later
+     surface leans on item-CF specifically, this is the first number to
+     check. The alternatives stay in `ITEM_CF_SWEEP` so the choice is
+     reversible with one rebuild.
+130. **Recommendation persistence grows without bound, and the obvious
+     cleanup would destroy training data.** ~21 KB per generated batch, ~90%
+     of it `recommendation_results`; 451 of 540 requests in the dev database
+     are already expired and nothing deletes them. The trap:
+     `recommendation_impressions` cascades from `recommendation_requests`, so
+     pruning expired requests would delete exactly the impression history
+     ADR-0015 exists to accumulate for a future learned ranker.
+     `recommendation_results` is the prunable part — nothing references it,
+     and it is dead for serving once `expires_at` passes. R9 documented the
+     policy rather than shipping a destructive job in the last phase.
+131. **Interest clustering is bimodal, and a mid threshold can represent
+     *less* evidence than a higher one.** Coherent onboarding seeds collapse
+     into one interest; scattered ones stay singletons; the intermediate
+     "two or three distinct interests" the design imagines needs a dozen-book
+     reader to appear. Worse, the fallback ladder only falls through to
+     per-book centroids when **no** cluster forms — so a reader with one pair
+     and six isolated books is profiled from the pair alone (2 of 8 books),
+     while a *higher* threshold profiles all 8. Correct per rec-spec §12.2's
+     literal ladder, and probably not what anyone intended. Not changed in
+     R9, which measured it rather than redesigning profiling at the end of a
+     phase.
+132. **The evaluation CLI measures one reader.** Every number in §5s except
+     the duplicate count and the offline CF sweeps comes from `Jakub` (18
+     evidence books) plus synthetic cold-start readers. The agreement lift,
+     the diversity figures and the sensitivity ranking are all
+     single-reader observations presented as system properties. They are
+     stable across processes and surfaces, which is some comfort, but the
+     honest description is "measured on the only real reader this database
+     has".
+133. **`stage_ms` is logged, never persisted.** The timings live in the
+     application log, so answering "was that batch slow?" needs log
+     retention, not a query. Persisting them means a migration on
+     `recommendation_requests`, which R9 judged not worth doing at a phase
+     boundary for a number nobody has yet needed historically.
+
 ## 7. Next phase
 
-**Recommender Phase R9 — evaluation, performance hardening, diagnostics and
-documentation.** The last phase in `RECOMMENDER_IMPLEMENTATION_PLAN.md`.
-Every earlier phase deferred something to it, and the list is now long
-enough that R9 should be planned against these risks rather than from a
-blank page:
+**None. Recommender Phase R9 was the last phase in
+`RECOMMENDER_IMPLEMENTATION_PLAN.md`, and the funnel is complete.**
 
-| Deferred to R9 | Risk |
+Every phase from R0 to R9 is done, all quality gates are green, and the
+integrated system has been measured rather than asserted: `docs/architecture/
+recommender.md` is the map, §5s is the evidence, and ADR-0026 is the one
+architectural decision R9 needed to take.
+
+**Seven items were deferred to R9 and all seven are closed:**
+
+| Deferred | Outcome |
 |---|---|
-| tune `merge_threshold`, and measure semantic singletons | #105, #110 |
-| decide mmap-by-default; profile a real worker under load | #106, #125 |
-| fix item-CF's saturated ranks at the aggregation, not the weight | #111 |
-| count near-duplicate works in the catalog | #117 |
-| explain why generators overlap on only 3.5% of candidates | #119 |
-| give every `SurfaceConfig` weight an evaluated value | #120 |
-| build the provider at startup instead of on first request | #121 |
+| tune `merge_threshold`, measure singletons (#105, #110) | swept; the shipped 0.55 survives, singleton cost quantified |
+| decide mmap-by-default, profile a real worker (#106, #125) | confirmed in a live worker under load: ~650 MB, flat |
+| fix item-CF's saturated ranks (#111) | fixed in the *builder*, not the aggregation — ADR-0026 |
+| count near-duplicate works (#117) | 75 books, 0.08% — too small to justify import-time dedup |
+| explain the 3.5% generator overlap (#119) | 12-32x above chance; two of three hypotheses true |
+| give every `SurfaceConfig` weight an evaluated value (#120) | influence-measured; fitting still needs labels |
+| build the provider at startup (#121) | 915 ms warm-up, failure-tolerant |
 
-**The one thing that would change the most, cheapest:** risk #119. RRF is
-chosen for rewarding agreement between independent mechanisms, and on real
-data there is almost none to reward — 21 of 602 Home candidates. Until that
-is explained, every surface weight is doing more work than intended and
-tuning them is guesswork.
+**R9 also closed three things nobody had listed.** The reranker was 24x
+slower than necessary at the batch size that actually ships, and risk #118's
+number was measured at `final = 20` rather than 60. `make typecheck` had not
+actually passed without the training group since R5, because the mypy
+overrides were never extended to the torch stack. And `--json` output was
+unparseable, because logs shared its stream.
 
-**Flipping the default** (`RECOMMENDATION_PROVIDER=pipeline` in `.env` and
-`.env.example`) is now unblocked: the phase's own condition was "after all
-required artifacts and tests are ready", and they are. It is a deployment
-decision, so it has been left to a human rather than made here (risk #122).
+**What is still open** is recorded as risks #122-#133 rather than as work
+items, because none of it is a phase. The two worth a decision:
 
-**The drift-item ledger stayed closed.** R8 fixed everything it broke
-inside the same pass — the racing redirect, the wrong e2e locator, the
-untruthful reason string and the misleading `model_version` — and the
-critical-flow e2e was corrected rather than weakened when the login
-destination changed. What it could not close is recorded as risks
-#121-#128.
+- **`RECOMMENDATION_PROVIDER` still defaults to `mock`** in `.env` and
+  `.env.example` (risk #122). Every condition the implementation plan set for
+  flipping it is now met — artifacts built, tests green, pipeline profiled,
+  degradation verified, warm-up in place. It remains a deployment decision
+  and a one-line settings change, deliberately left to a human.
+- **Recommendation persistence has no cleanup** (risk #130), and the obvious
+  cleanup would destroy impression history. The policy is documented; the job
+  is not written.
 
-**The previous entry, retained:** R7 emptied one item from the ledger.
-R4 emptied it; R5 and R6 added none. R7 fixed a defect its own live run
-found (the reranker never comparing candidates to the source book) and
-**corrected an R6 conclusion that was wrong** — that ADR-0017's cosine
-near-duplicate reranking would handle duplicate works. It does not, which
-was measured rather than argued, and risk #112 has been rewritten. What R7
-could not close is recorded as risks #116-#120 rather than left implicit,
-the largest being #119: the generators overlap on 3.5% of candidates, so
-RRF has almost no agreement to reward.
+**The drift-item ledger stayed closed.** R9 fixed everything it broke inside
+the same pass — the integration suite the warm-up disturbed, the `--json`
+stream, the equivalence test whose first sabotage caught nothing — and
+**corrected two earlier records against real data**: R6's prediction about
+where risk #111 should be fixed, and R7's reranker latency figure. Both
+corrections are inline in §5s and in the risk entries themselves, not
+appended as errata.
+
+**The previous entry, retained:** R8 fixed everything it broke inside the
+same pass — the racing redirect, the wrong e2e locator, the untruthful reason
+string and the misleading `model_version` — and the critical-flow e2e was
+corrected rather than weakened when the login destination changed. What it
+could not close was recorded as risks #121-#128; R9 closed #121 and #125,
+measured #128's question as part of the cold-start ladder, and left the rest.
 
 ### The application sequence is complete
 

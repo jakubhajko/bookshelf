@@ -24,6 +24,11 @@ Current build state, phase by phase, lives in
 [`docs/implementation/plan.md`](docs/implementation/plan.md); architectural
 decisions are recorded as ADRs in [`docs/adr/`](docs/adr/).
 
+How the recommendation funnel actually works — artifacts, signals, surface
+configuration, how to rebuild and tune the models, measured performance and
+known limitations — is
+[`docs/architecture/recommender.md`](docs/architecture/recommender.md).
+
 ## Repository layout
 
 ```text
@@ -96,6 +101,8 @@ make build-als               train + export ALS (needs setup-training)
 make build-item-cf           build item-item CF (needs setup-training)
 make build-content           build content embeddings (needs setup-training; ~96 min)
 make inspect-recommender-profile USERNAME=<name> [ARGS=--json]  inspect a reader's interests
+make evaluate-recommender USERNAME=<name> [ARGS="--section depth --json"]  evaluate the pipeline
+make evaluate-content        embedding sanity: Goodreads overlap + coherence
 make e2e                     Playwright critical-flow tests (spec §13.5) — needs a running, migrated API
 make generate-api-client     frontend client from the OpenAPI schema
 ```

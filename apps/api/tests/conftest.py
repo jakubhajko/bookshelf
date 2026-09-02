@@ -21,7 +21,11 @@ from book_app.main import create_app
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(environment="test")
+    # The startup warm-up is the one thing in the lifespan that would need a
+    # database (risk #121), and this suite deliberately has none — see the
+    # module docstring. Off explicitly rather than by environment, so a
+    # developer running these next to a live Postgres gets the same run.
+    return Settings(environment="test", recommendation_warmup_on_startup=False)
 
 
 @pytest.fixture

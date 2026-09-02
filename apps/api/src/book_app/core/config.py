@@ -101,6 +101,20 @@ class Settings(BaseSettings):
     #: existed only to reserve the seam. ``mock`` and ``popularity`` remain
     #: for development and as the standalone fallback respectively.
     recommendation_provider: Literal["mock", "popularity", "pipeline"] = "mock"
+    #: Build the provider during application startup instead of on the first
+    #: request that needs it (risk #121).
+    #:
+    #: The pipeline loads six artifacts, which is ~1 s of work that a real
+    #: reader used to pay on the first request after every deploy, per
+    #: worker. Startup is the right place for it (spec §10.13: "load once at
+    #: startup"), and a failure there is logged and left to the lazy path
+    #: rather than taking the process down.
+    #:
+    #: Off in the unit suite, which builds the app without a database on
+    #: purpose (``apps/api/tests/conftest.py``). Explicit rather than
+    #: inferred from ``environment``, so nothing silently changes behaviour
+    #: when a test happens to run next to a live Postgres.
+    recommendation_warmup_on_startup: bool = True
 
     # --- Demo toggle (behavior lands in Phase 4/9); must never be true in production ---
     demo_mode_enabled: bool = False

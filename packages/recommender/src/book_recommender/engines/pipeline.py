@@ -29,7 +29,9 @@ genuinely produced the candidate.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -72,6 +74,7 @@ from book_recommender.pipeline import (
     DeterministicRanker,
     DiversityReranker,
     FusedCandidate,
+    RankedCandidate,
     Ranker,
     RankingContext,
     RerankContext,
@@ -83,6 +86,34 @@ from book_recommender.profiling import SemanticProfile, build_semantic_profile
 from book_recommender.profiling.interests import InterestProfile
 
 MODEL_NAME = "pipeline"
+
+
+class _StageTimer:
+    """Wall-clock milliseconds per pipeline stage.
+
+    Wall clock rather than CPU time on purpose: the semantic stages page a
+    memory-mapped matrix (ADR-0014), and the time a request spends waiting
+    for the OS to fault pages in is time the reader waits too.
+    """
+
+    def __init__(self) -> None:
+        self._stages: dict[str, float] = {}
+
+    @contextmanager
+    def stage(self, name: str) -> Iterator[None]:
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._stages[name] = (
+                self._stages.get(name, 0.0) + (time.perf_counter() - started) * 1000.0
+            )
+
+    def as_dict(self) -> dict[str, float]:
+        stages = {name: round(value, 2) for name, value in self._stages.items()}
+        stages["total"] = round(sum(self._stages.values()), 2)
+        return stages
+
 
 #: Internal ratings at or below this are negative evidence for the ranker
 #: (rec-spec §7.1's 1-5 rows). 6 is neutral and contributes to neither side.
@@ -137,6 +168,39 @@ class PipelineDependencies:
         return f"pipeline-{digest}"
 
 
+@dataclass(frozen=True)
+class PipelineTrace:
+    """Every stage's output for one request (rec-spec §23.3).
+
+    Returned by :meth:`PipelineRecommendationEngine.run`, which
+    :meth:`PipelineRecommendationEngine.recommend` is a thin wrapper around,
+    so an evaluation that reads this is reading the served pipeline rather
+    than a reconstruction of it.
+    """
+
+    surface: SurfaceConfig
+    profile: SemanticProfile | None
+    #: Application-owned eligibility as the generators saw it.
+    exclusions: frozenset[int]
+    generator_results: tuple[GeneratorResult, ...]
+    fused: tuple[FusedCandidate, ...]
+    ranked: tuple[RankedCandidate, ...]
+    final: tuple[RerankedCandidate, ...]
+    #: Wall-clock milliseconds per stage, plus ``total``.
+    stage_ms: Mapping[str, float]
+
+    def result_for(self, generator: str) -> GeneratorResult | None:
+        for result in self.generator_results:
+            if result.generator.value == generator:
+                return result
+        return None
+
+    @property
+    def quotas(self) -> dict[str, int]:
+        """What each participating generator was asked for."""
+        return {quota.generator: quota.count for quota in self.surface.quotas if quota.enabled}
+
+
 class PipelineRecommendationEngine:
     """Generators -> weighted RRF -> deterministic ranking -> reranking."""
 
@@ -157,38 +221,102 @@ class PipelineRecommendationEngine:
         self._signal_weights = signal_weights
         self._profile_config = profile_config
 
+    @property
+    def dependencies(self) -> PipelineDependencies:
+        """The artifacts this engine was built with.
+
+        Read-only, for offline evaluation that needs the same metadata and
+        popularity tables the pipeline used. Returning the frozen dataclass
+        rather than the artifacts individually keeps the accessor from
+        growing one property per family.
+        """
+        return self._deps
+
+    def with_surfaces(self, overrides: Mapping[str, SurfaceConfig]) -> PipelineRecommendationEngine:
+        """The same engine with some surface configurations replaced.
+
+        Artifacts are shared, not reloaded — the point of this is to vary
+        quotas and weights over a fixed artifact set, which is how a sweep
+        stays a measurement of the configuration rather than of the loader.
+        """
+        return PipelineRecommendationEngine(
+            self._deps,
+            surfaces={**self._surfaces, **overrides},
+            ranker=self._ranker,
+            reranker=self._reranker,
+            signal_weights=self._signal_weights,
+            profile_config=self._profile_config,
+        )
+
     def recommend(self, request: RecommendationEngineRequest) -> RecommendationEngineResult:
-        surface_context = request.surface_context
-        surface = self._surfaces.get(surface_context.surface, self._surfaces["home"])
-
-        profile = self._build_profile(request.user_context)
-        exclusions = self._exclusions(request)
-
-        results = self._run_generators(request, surface, exclusions, profile)
-        fused = fuse(results, surface=surface)
-
-        ranked = self._ranker.rank(
-            fused,
-            context=self._ranking_context(request, surface, profile),
-        )
-        final = self._reranker.rerank(
-            ranked,
-            context=RerankContext(
-                surface=surface,
-                embeddings=self._deps.embeddings,
-                metadata=self._deps.metadata,
-                reference_book_ids=self._reference_books(surface_context),
-            ),
-            limit=request.requested_count,
-        )
-
+        trace = self.run(request)
         return RecommendationEngineResult(
             model_name=MODEL_NAME,
             model_version=self._deps.resolved_model_version(),
             catalog_version=request.catalog_version,
             generated_at=datetime.now(UTC),
-            candidates=tuple(self._to_engine_candidate(entry, request, profile) for entry in final),
-            diagnostics=self._diagnostics(surface, results, fused, profile),
+            candidates=tuple(
+                self._to_engine_candidate(entry, request, trace.profile) for entry in trace.final
+            ),
+            diagnostics=self._diagnostics(trace),
+        )
+
+    def run(self, request: RecommendationEngineRequest) -> PipelineTrace:
+        """Every stage, with the intermediate state each one produced.
+
+        ``recommend`` is this method plus the shaping of its last stage into
+        the engine contract, which is deliberate: rec-spec §23.3 wants
+        candidate-source coverage and diversity reported, and CLAUDE.md
+        requires inspection tooling to call the same implementation serving
+        uses. A diagnostic that re-ran the generators itself would drift
+        from the served path on the first surface-config change, and would
+        report the drift as a finding.
+
+        The trace holds ranked candidates and their features. It is a
+        development and offline-evaluation object, not a response payload —
+        rec-spec §17 warns against letting diagnostics become a dump, and
+        what reaches persistence is the compact per-candidate provenance in
+        ``_candidate_diagnostics``.
+        """
+        surface_context = request.surface_context
+        surface = self._surfaces.get(surface_context.surface, self._surfaces["home"])
+
+        timer = _StageTimer()
+        with timer.stage("profile"):
+            profile = self._build_profile(request.user_context)
+        exclusions = self._exclusions(request)
+
+        with timer.stage("generate"):
+            results = self._run_generators(request, surface, exclusions, profile)
+        with timer.stage("fuse"):
+            fused = fuse(results, surface=surface)
+
+        with timer.stage("rank"):
+            ranked = self._ranker.rank(
+                fused,
+                context=self._ranking_context(request, surface, profile),
+            )
+        with timer.stage("rerank"):
+            final = self._reranker.rerank(
+                ranked,
+                context=RerankContext(
+                    surface=surface,
+                    embeddings=self._deps.embeddings,
+                    metadata=self._deps.metadata,
+                    reference_book_ids=self._reference_books(surface_context),
+                ),
+                limit=request.requested_count,
+            )
+
+        return PipelineTrace(
+            surface=surface,
+            profile=profile,
+            exclusions=exclusions,
+            generator_results=tuple(results),
+            fused=tuple(fused),
+            ranked=tuple(ranked),
+            final=tuple(final),
+            stage_ms=timer.as_dict(),
         )
 
     # --- stages -----------------------------------------------------------
@@ -498,26 +626,27 @@ class PipelineRecommendationEngine:
             diagnostics["rerank_reasons"] = list(entry.reasons)
         return diagnostics
 
-    def _diagnostics(
-        self,
-        surface: SurfaceConfig,
-        results: Sequence[GeneratorResult],
-        fused: Sequence[FusedCandidate],
-        profile: SemanticProfile | None,
-    ) -> dict[str, Any]:
+    def _diagnostics(self, trace: PipelineTrace) -> dict[str, Any]:
         """Batch-level diagnostics. Counts and statuses only — no book
         titles, no user identifiers, no vectors."""
+        profile = trace.profile
         return {
-            "surface": surface.name,
+            "surface": trace.surface.name,
+            # rec-spec §24 wants inference kept "comfortably inside the
+            # existing timeout", which is a claim about production rather
+            # than about a profiling script. Five `perf_counter` reads per
+            # request is the cheapest way to make it checkable on a real
+            # worker under real load (risk #125).
+            "stage_ms": dict(trace.stage_ms),
             "generators": {
                 result.generator.value: {
                     "status": str(result.status),
                     "candidates": len(result.candidates),
                 }
-                for result in results
+                for result in trace.generator_results
             },
-            "fused_candidates": len(fused),
-            "multi_source_candidates": sum(1 for c in fused if c.agreement > 1),
+            "fused_candidates": len(trace.fused),
+            "multi_source_candidates": sum(1 for c in trace.fused if c.agreement > 1),
             "profile_strategy": ("absent" if profile is None else str(profile.interests.strategy)),
             "interests": 0 if profile is None else len(profile.interests.clusters),
             "shelf_profiles": 0 if profile is None else len(profile.shelves),

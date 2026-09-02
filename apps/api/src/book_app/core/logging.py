@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import cast
+from typing import TextIO, cast
 
 import structlog
 from structlog.typing import FilteringBoundLogger
@@ -19,11 +19,19 @@ from structlog.typing import FilteringBoundLogger
 from book_app.core.config import Settings
 
 
-def configure_logging(settings: Settings) -> None:
-    """Configure stdlib logging + structlog to emit one JSON object per line."""
-    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+def configure_logging(settings: Settings, *, stream: TextIO | None = None) -> None:
+    """Configure stdlib logging + structlog to emit one JSON object per line.
 
-    logging.basicConfig(format="%(message)s", stream=sys.stdout, level=level)
+    ``stream`` defaults to stdout, which is right for a server whose log is
+    its output. A CLI whose *own* output is machine-readable passes stderr
+    instead, so that piping its JSON somewhere does not hand the consumer a
+    stream of interleaved log lines — which is exactly what
+    ``evaluate_recommender --json`` did before R9 noticed.
+    """
+    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    target = stream if stream is not None else sys.stdout
+
+    logging.basicConfig(format="%(message)s", stream=target, level=level, force=True)
 
     structlog.configure(
         processors=[
@@ -36,7 +44,7 @@ def configure_logging(settings: Settings) -> None:
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+        logger_factory=structlog.PrintLoggerFactory(file=target),
         cache_logger_on_first_use=True,
     )
 

@@ -32,6 +32,7 @@ from book_app.modules.auth.dependencies import build_auth_rate_limiter
 from book_app.modules.books.api import router as books_router
 from book_app.modules.interactions.api import router as interactions_router
 from book_app.modules.recommendations.api import router as recommendations_router
+from book_app.modules.recommendations.dependencies import warm_recommendation_provider
 from book_app.modules.search.api import router as search_router
 from book_app.modules.shelves.api import router as shelves_router
 from book_app.shared.rate_limit import InMemoryFixedWindowRateLimiter
@@ -49,7 +50,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     session_factory = create_session_factory(engine)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        warm_recommendation_provider(app)
         logger.info("app_started", environment=resolved_settings.environment.value)
         yield
         engine.dispose()

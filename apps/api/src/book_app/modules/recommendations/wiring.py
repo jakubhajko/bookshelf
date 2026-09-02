@@ -84,12 +84,24 @@ def _load_optional[T](name: str, loader: Callable[[], T], *, mmap_note: str = ""
     return artifact
 
 
-def _build_pipeline_engine(
+def build_pipeline_engine(
     storage: LocalArtifactStorage,
     catalog: CatalogSnapshot,
     popularity: PopularityArtifact | None,
+    *,
+    withheld_families: frozenset[str] = frozenset(),
 ) -> PipelineRecommendationEngine:
     """Load every artifact family once and assemble the five generators.
+
+    Public because the ``evaluate_recommender`` CLI builds the engine the
+    same way serving does. A diagnostic that assembled its own generator
+    tuple would measure a pipeline nobody is served (CLAUDE.md).
+
+    ``withheld_families`` skips loading the named families, which is how
+    that CLI's degradation section models rec-spec §27 without moving files
+    around. Withholding is exactly what a missing, stale or corrupt artifact
+    reduces to here — ``_load_optional`` returns ``None`` for all three — so
+    the simulated failure and the real one take the same code path.
 
     Per-worker memory is the binding constraint here, not latency (plan.md
     §5n): all six families cost ~1.0-1.2 GB resident, of which the content
@@ -99,19 +111,26 @@ def _build_pipeline_engine(
     the array is read once per request and paged from the OS cache, which
     is what mmap is for.
     """
-    content: ContentEmbeddings | None = _load_optional(
+
+    def load[T](family: str, loader: Callable[[], T], *, mmap_note: str = "") -> T | None:
+        if family in withheld_families:
+            logger.info("artifact_withheld", family=family)
+            return None
+        return _load_optional(family, loader, mmap_note=mmap_note)
+
+    content: ContentEmbeddings | None = load(
         "content",
         lambda: load_content_artifact(storage, catalog=catalog, mmap=True),
         mmap_note="mmap",
     )
-    metadata: ItemMetadataTable | None = _load_optional(
+    metadata: ItemMetadataTable | None = load(
         "item_metadata", lambda: load_item_metadata_artifact(storage, catalog=catalog)
     )
-    als = _load_optional(
+    als = load(
         "als", lambda: load_als_artifact(storage, catalog=catalog, mmap=True), mmap_note="mmap"
     )
-    item_cf = _load_optional("item_cf", lambda: load_item_cf_artifact(storage, catalog=catalog))
-    graph = _load_optional(
+    item_cf = load("item_cf", lambda: load_item_cf_artifact(storage, catalog=catalog))
+    graph = load(
         "source_similarity", lambda: load_source_similarity_artifact(storage, catalog=catalog)
     )
 
@@ -213,7 +232,7 @@ def build_recommendation_provider(
     if settings.recommendation_provider == "mock":
         primary_engine = MockRecommendationEngine(mock_pool)
     else:
-        primary_engine = _build_pipeline_engine(storage, catalog, popularity_artifact)
+        primary_engine = build_pipeline_engine(storage, catalog, popularity_artifact)
 
     # Spec §10.10's chain is unchanged by R8: the pipeline is the primary,
     # and standalone popularity is still behind it. The pipeline degrades

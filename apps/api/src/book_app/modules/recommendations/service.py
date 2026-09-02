@@ -17,11 +17,12 @@ from book_recommender.contracts.context import (
     SimilarBooksContext,
     UserContext,
 )
-from book_recommender.contracts.provider import RecommendationProvider
+from book_recommender.contracts.provider import RecommendationBatch, RecommendationProvider
 from book_recommender.contracts.provider import RecommendationRequest as ProviderRequest
 from book_recommender.exceptions import ProviderError
 from sqlalchemy.orm import Session
 
+from book_app.core.logging import get_logger
 from book_app.modules.books import repository as books_repository
 from book_app.modules.books.exceptions import BookNotFoundError
 from book_app.modules.books.repository import CatalogCardRow
@@ -39,6 +40,8 @@ from book_app.modules.recommendations.surfaces import Surface
 from book_app.modules.shelves import repository as shelves_repository
 from book_app.modules.shelves.exceptions import ShelfNotFoundError
 from book_app.shared.pagination import InvalidCursorError, decode_cursor, encode_cursor
+
+logger = get_logger("book_app.recommendations.service")
 
 DEFAULT_PAGE_SIZE = 20
 BATCH_SIZE = 60  # "a larger ordered batch than one page needs" (spec §9.9)
@@ -225,6 +228,8 @@ async def _generate_first_page(
     except ProviderError as exc:
         raise RecommendationUnavailableError() from exc
 
+    _log_batch(batch, surface=surface, request_id=request_id)
+
     # spec §10.8: validate defensively regardless of what the provider
     # promised — get_catalog_cards only returns currently-active, existent
     # books, so anything else is silently dropped here.
@@ -374,4 +379,37 @@ def _read_cursor_page(
         fallback_used=request.fallback_used,
         items=items,
         next_cursor=next_cursor,
+    )
+
+
+def _log_batch(batch: RecommendationBatch, *, surface: Surface, request_id: UUID) -> None:
+    """One structured line per generated batch (rec-spec §24, risk #125).
+
+    The engine measures its own stages, and before this they were computed
+    and thrown away: batch-level diagnostics are not persisted — only the
+    compact per-candidate provenance on each result row is. That made the
+    "comfortably inside the timeout" claim checkable in a profiling script
+    and nowhere else, which is precisely the wrong way round for a property
+    that only matters under real load.
+
+    Counts, statuses and milliseconds only. No user id, no book titles, no
+    vectors — CLAUDE.md's rule that diagnostics must not become an
+    accidental sensitive-data dump applies to logs first of all. The
+    ``request_id`` is already the batch's own identifier and is what joins
+    this line to the persisted rows.
+    """
+    diagnostics = batch.diagnostics or {}
+    logger.info(
+        "recommendation_batch",
+        request_id=str(request_id),
+        surface=surface.value,
+        provider=batch.provider_name,
+        model=batch.model_name,
+        model_version=batch.model_version,
+        fallback_used=batch.fallback_used,
+        candidates=len(batch.candidates),
+        stage_ms=diagnostics.get("stage_ms"),
+        fused_candidates=diagnostics.get("fused_candidates"),
+        multi_source_candidates=diagnostics.get("multi_source_candidates"),
+        generators=diagnostics.get("generators"),
     )

@@ -146,6 +146,7 @@ def run_build(
                 config={
                     "similarity": config.similarity,
                     "top_k": config.top_k,
+                    "min_support": config.min_support,
                     "transform": dataset.transform_version,
                 },
             )
@@ -196,6 +197,7 @@ def run_build(
             config={
                 "similarity": best_config.similarity,
                 "top_k": best_config.top_k,
+                "min_support": best_config.min_support,
                 "bm25_k1": best_config.bm25_k1,
                 "bm25_b": best_config.bm25_b,
                 "selected_by": f"ndcg@{SELECTION_K}",
@@ -244,6 +246,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--similarity", choices=("cosine", "bm25"))
     parser.add_argument("--top-k", type=int, default=ITEM_CF_DEFAULT.top_k)
+    parser.add_argument("--min-support", type=int, default=ITEM_CF_DEFAULT.min_support)
     parser.add_argument("--with-neutral", action="store_true")
     parser.add_argument("--evaluation-users", type=int, default=DEFAULT_EVALUATION_USERS)
     parser.add_argument("--interactions", type=Path, default=DEFAULT_INTERACTIONS_PATH)
@@ -259,7 +262,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.sweep:
         configs = ITEM_CF_SWEEP
     elif args.similarity:
-        configs = (ItemCfConfig(similarity=args.similarity, top_k=args.top_k),)
+        configs = (
+            ItemCfConfig(
+                similarity=args.similarity, top_k=args.top_k, min_support=args.min_support
+            ),
+        )
     else:
         configs = (ITEM_CF_DEFAULT,)
 

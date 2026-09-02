@@ -243,3 +243,63 @@ def test_neighbors_per_seed_bounds_the_fan_out(storage: LocalArtifactStorage) ->
     candidates = artifact.candidates_from_seeds([(10, 1.0)], count=10, neighbors_per_seed=2)
 
     assert [book_id for book_id, _ in candidates] == [60, 70]
+
+
+class TestSaturatedSimilarityStillProducesAMeaningfulRank:
+    """Risk #111, measured in R9 and fixed here.
+
+    10.37% of the live artifact's edges have a similarity of exactly 1.0, so
+    the additive aggregate saturates and large groups of candidates land on
+    an identical score. Fusion reads rank and nothing else (ADR-0017), so
+    whatever breaks that tie *becomes* the evidence. Before R9 it was
+    `book_id` — catalog insertion order, presented to RRF as signal. On the
+    live reader, 150 returned candidates carried 57 distinct scores with a
+    largest tie group of 74.
+    """
+
+    def test_more_seeds_reaching_a_book_outranks_a_lower_book_id(
+        self, storage: LocalArtifactStorage
+    ) -> None:
+        """One strong seed and two weak ones produce identical totals.
+
+        Book 60 is reached once at weight 1.0; book 70 twice at weight 0.5.
+        Both total exactly 1.0, and 60 has the smaller id — so the *only*
+        thing that can order them correctly is how many of the reader's
+        books point at them.
+        """
+        _write(storage, {0: [(5, 1.0)], 1: [(6, 1.0)], 2: [(6, 1.0)]})
+
+        artifact = load_item_cf_artifact(storage, catalog=CATALOG)
+        candidates = artifact.candidates_from_seeds([(10, 1.0), (20, 0.5), (30, 0.5)], count=5)
+
+        assert [score for _, score in candidates] == pytest.approx([1.0, 1.0])
+        assert [book_id for book_id, _ in candidates] == [70, 60]
+
+    def test_a_stronger_neighbour_position_breaks_a_saturated_tie(
+        self, storage: LocalArtifactStorage
+    ) -> None:
+        """Every edge at similarity 1.0 from one seed: the scores are
+        indistinguishable, but the artifact stores each row strongest-first,
+        so position within the row is real signal that `book_id` discarded."""
+        _write(storage, {0: [(8, 1.0), (7, 1.0), (6, 1.0), (5, 1.0)]})
+
+        artifact = load_item_cf_artifact(storage, catalog=CATALOG)
+        candidates = artifact.candidates_from_seeds([(10, 1.0)], count=4)
+
+        # Row order, not ascending book_id.
+        assert [book_id for book_id, _ in candidates] == [90, 80, 70, 60]
+
+    def test_book_id_still_guarantees_determinism_when_all_else_ties(
+        self, storage: LocalArtifactStorage
+    ) -> None:
+        """The final tiebreak has to stay, or the persisted batch stops being
+        reproducible (rec-spec §18)."""
+        _write(storage, {0: [(6, 1.0)], 1: [(5, 1.0)]})
+
+        artifact = load_item_cf_artifact(storage, catalog=CATALOG)
+        runs = {artifact.candidates_from_seeds([(10, 1.0), (20, 1.0)], count=2) for _ in range(5)}
+
+        assert len(runs) == 1
+        # Same score, same agreement (1 seed each), same position (0 each) —
+        # so book_id decides, ascending.
+        assert [book_id for book_id, _ in next(iter(runs))] == [60, 70]

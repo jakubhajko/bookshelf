@@ -89,8 +89,14 @@ disallow_untyped_defs = false
 # from the default environment `make typecheck` runs in (they live in the
 # `training` group — ADR-0021). Typechecking must not require installing a
 # dependency set the API never uses.
+#
+# `torch` and `sentence_transformers` were missing from this list until R9.
+# The gap was invisible because every run since R5 — the phase that added
+# `content_encoding.py` — happened to have the training group installed, so
+# the invariant this list exists to protect was quietly untrue for four
+# phases. Adding a module to the training group means adding it here too.
 [[tool.mypy.overrides]]
-module = ["implicit.*", "scipy.*"]
+module = ["implicit.*", "scipy.*", "torch.*", "sentence_transformers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

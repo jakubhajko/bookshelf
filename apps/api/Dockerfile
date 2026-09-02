@@ -26,11 +26,12 @@ RUN apt-get update \
 WORKDIR /workspace
 ENV PYTHONUNBUFFERED=1 \
     UV_PROJECT_ENVIRONMENT=/workspace/.venv \
-    PATH="/workspace/.venv/bin:${PATH}"
+    PATH="/workspace/.venv/bin:${PATH}" \
+    PORT=8000
 
 EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=5s --retries=5 --start-period=10s \
-    CMD python3 -c "import urllib.request as u; u.urlopen('http://localhost:8000/api/v1/health/live', timeout=3)"
+    CMD python3 -c "import os, urllib.request as u; u.urlopen('http://localhost:%s/api/v1/health/live' % os.environ.get('PORT', '8000'), timeout=3)"
 
 
 # --- dev: unchanged from Phase 1 --------------------------------------------
@@ -54,18 +55,33 @@ FROM base AS production
 # `--no-dev` excludes both packages' `[dependency-groups] dev` (ruff/mypy/
 # pytest/httpx2/pandas-stubs) — never needed at runtime, and ruff/mypy
 # especially have no business being in a production image at all.
-COPY pyproject.toml uv.lock* ./
-COPY apps/api ./apps/api
-COPY packages/recommender ./packages/recommender
-RUN uv sync --package book-app --no-dev
-
 # Runs as a non-root user (spec §14's security posture extended to the
 # container itself, not just the application) — a fixed uid (not the
 # default sequential one useradd would pick) so it matches predictably
 # across rebuilds, e.g. for volume ownership if one is ever added.
-RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /workspace
+#
+# The user is created and switched to BEFORE anything is copied or installed,
+# and `chown` touches only the (still empty) /workspace directory itself, not
+# its future contents. A trailing `chown -R appuser /workspace` would instead
+# rewrite ownership on every file of the installed venv — and because Docker
+# layers are copy-on-write and ownership is file metadata, that duplicated the
+# entire ~338 MB venv into a second layer, making the production image LARGER
+# than the dev one. `COPY --chown` + installing as appuser gets the same
+# result in one layer.
+RUN useradd --create-home --uid 1000 appuser && chown appuser:appuser /workspace
 USER appuser
+
+COPY --chown=appuser:appuser pyproject.toml uv.lock* ./
+COPY --chown=appuser:appuser apps/api ./apps/api
+COPY --chown=appuser:appuser packages/recommender ./packages/recommender
+RUN uv sync --package book-app --no-dev
 
 # No --reload, and explicitly not `uv run` (which would want dev-group
 # resolution available) — invoke the installed venv's uvicorn directly.
-CMD [".venv/bin/uvicorn", "book_app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Cloud Run injects $PORT (usually 8080) and requires the server to listen on
+# it; locally PORT defaults to 8000 (set in `base`), so nothing changes here.
+# `sh -c exec` rather than plain shell form: `exec` replaces the shell process
+# with uvicorn, so uvicorn stays PID 1 and actually receives the SIGTERM
+# Cloud Run sends before shutting an instance down. Without `exec`, the shell
+# is PID 1, swallows the signal, and every deploy ends in a 10s SIGKILL.
+CMD ["sh", "-c", "exec .venv/bin/uvicorn book_app.main:app --host 0.0.0.0 --port ${PORT}"]

@@ -263,3 +263,69 @@ def test_empty_matrix_produces_empty_neighbours() -> None:
     assert len(indptr) == ITEM_COUNT + 1
     assert indices == []
     assert scores == []
+
+
+def test_single_reader_coincidences_are_not_neighbours() -> None:
+    """Risk #111, and the measurement that located it.
+
+    10.37% of the v1 artifact's edges scored exactly **1.0**, and sampling
+    the live matrix showed why: cosine is 1.0 only when two items have
+    identical reader vectors, and every such group examined was items with
+    a single reader each. Two books one person happened to own is not
+    collaborative evidence, but it is a structurally perfect match, so
+    neither BM25 nor a tiebreak can discount it — only support can.
+
+    Here reader 0 owns items 1 and 2 and nobody else owns either. Readers
+    1-3 all own items 1 and 4.
+    """
+    rows: list[tuple[int, int, float]] = [(0, 1, 1.0), (0, 2, 1.0)]
+    for user in (1, 2, 3):
+        rows.extend([(user, 1, 1.0), (user, 4, 1.0)])
+    matrix = build_user_item_matrix(_dataset(rows))
+
+    permissive = train_item_neighbors(
+        matrix, ItemCfConfig(similarity="cosine", top_k=10, min_support=1)
+    )
+    filtered = train_item_neighbors(
+        matrix, ItemCfConfig(similarity="cosine", top_k=10, min_support=2)
+    )
+
+    assert 2 in permissive[1][permissive[0][1] : permissive[0][2]], (
+        "min_support=1 is v1's behaviour and must still admit the coincidence"
+    )
+    assert filtered[1][filtered[0][1] : filtered[0][2]] == [4], (
+        "the single-reader edge is dropped; the three-reader edge survives"
+    )
+
+
+def test_filtering_happens_before_top_k_so_rows_stay_full() -> None:
+    """A row whose strongest edges are all coincidences must keep its next
+    real ones rather than coming back short."""
+    rows: list[tuple[int, int, float]] = [(0, 1, 1.0), (0, 2, 1.0), (0, 3, 1.0)]
+    for user in (1, 2):
+        rows.extend([(user, 1, 1.0), (user, 5, 1.0), (user, 6, 1.0)])
+    matrix = build_user_item_matrix(_dataset(rows))
+
+    indptr, indices, _ = train_item_neighbors(
+        matrix, ItemCfConfig(similarity="cosine", top_k=1, min_support=2)
+    )
+
+    assert indices[indptr[1] : indptr[2]] in ([5], [6])
+
+
+def test_ties_with_equal_support_still_rebuild_byte_identically() -> None:
+    """The column index has to stay as the final key: a rebuild from
+    identical input must produce an identical artifact (rec-spec §18)."""
+    # Three readers, because the shipped `min_support` is 3 — a two-reader
+    # fixture would be filtered out entirely and the assertion below would
+    # pass vacuously on an empty row.
+    rows: list[tuple[int, int, float]] = []
+    for user in (0, 1, 2):
+        rows.extend([(user, 1, 1.0), (user, 2, 1.0), (user, 3, 1.0)])
+    matrix = build_user_item_matrix(_dataset(rows))
+
+    first = train_item_neighbors(matrix, ItemCfConfig(similarity="cosine", top_k=10))
+    second = train_item_neighbors(matrix, ItemCfConfig(similarity="cosine", top_k=10))
+
+    assert first == second
+    assert first[1][first[0][1] : first[0][2]] == [2, 3]

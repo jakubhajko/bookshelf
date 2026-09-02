@@ -20,8 +20,8 @@ from book_recommender.config import (
 from book_recommender.pipeline import DiversityReranker, RerankContext, series_of
 from book_recommender.pipeline.fusion import FusedCandidate, SourceContribution
 from book_recommender.pipeline.ranking import RankedCandidate
-from book_recommender.pipeline.reranking import duplicate_key
-from generator_world import build_all, load_content, load_metadata
+from book_recommender.pipeline.reranking import RerankedCandidate, duplicate_key
+from generator_world import ALL_BOOKS, build_all, load_content, load_metadata
 
 
 def candidate(book_id: int, score: float, *, provenance: str = "als") -> RankedCandidate:
@@ -449,3 +449,259 @@ def test_numpy_is_not_leaked_into_scores() -> None:
         [candidate(1, 1.0)], context=RerankContext(surface=HOME_SURFACE), limit=1
     )
     assert not isinstance(selected[0].score, np.ndarray)
+
+
+class ReferenceReranker:
+    """The obvious greedy implementation, kept as the definition of correct.
+
+    R9 replaced the near-duplicate term with a running maximum updated once
+    per selection instead of a matrix rebuilt once per candidate per step —
+    24x faster on a real Home batch (plan.md §5s). That is an optimization,
+    not a policy change, so "identical to the obvious implementation" is the
+    property that has to keep holding. This class is the obvious
+    implementation, and the test below is what stops the two drifting.
+    """
+
+    def rerank(
+        self,
+        candidates: list[RankedCandidate],
+        *,
+        context: RerankContext,
+        limit: int,
+    ) -> tuple[RerankedCandidate, ...]:
+        config = context.surface.rerank
+        remaining = list(candidates)
+        selected: list[RerankedCandidate] = []
+        authors: dict[str, int] = {}
+        series: dict[str, int] = {}
+        interests: dict[str, int] = {}
+        sources: dict[str, int] = {}
+        chosen_vectors: list[np.ndarray] = []
+        chosen_keys: set[tuple[str, str]] = set()
+
+        for book_id in context.reference_book_ids:
+            row = None if context.metadata is None else context.metadata.get(book_id)
+            key = None if row is None else duplicate_key(row.title, row.author)
+            if key is not None:
+                chosen_keys.add(key)
+            vector = self._vector(book_id, context)
+            if vector is not None:
+                chosen_vectors.append(vector)
+
+        explore_after = max(limit - config.exploration_slots, 0)
+        while remaining and len(selected) < limit:
+            want_exploration = (
+                config.exploration_slots > 0 and len(selected) >= explore_after and bool(interests)
+            )
+            best_index, best_value = 0, -np.inf
+            best_penalty = 0.0
+            best_reasons: tuple[str, ...] = ()
+            for index, entry in enumerate(remaining):
+                penalty, reasons = self._penalty(
+                    entry,
+                    context,
+                    authors,
+                    series,
+                    interests,
+                    sources,
+                    chosen_vectors,
+                    chosen_keys,
+                )
+                value = entry.score - penalty
+                if want_exploration and self._interest(entry) in interests:
+                    value -= 1e6
+                if value > best_value:
+                    best_index, best_value = index, value
+                    best_penalty, best_reasons = penalty, reasons
+
+            entry = remaining.pop(best_index)
+            interest = self._interest(entry)
+            selected.append(
+                RerankedCandidate(
+                    book_id=entry.book_id,
+                    position=len(selected) + 1,
+                    ranked=entry,
+                    penalty=best_penalty,
+                    reasons=best_reasons,
+                    exploration=want_exploration and interest not in interests,
+                )
+            )
+            row = None if context.metadata is None else context.metadata.get(entry.book_id)
+            if row is not None:
+                if row.author:
+                    authors[row.author] = authors.get(row.author, 0) + 1
+                name = series_of(row.title)
+                if name:
+                    series[name] = series.get(name, 0) + 1
+                key = duplicate_key(row.title, row.author)
+                if key is not None:
+                    chosen_keys.add(key)
+            interests[interest] = interests.get(interest, 0) + 1
+            source = entry.fused.sources[0].generator if entry.fused.sources else ""
+            sources[source] = sources.get(source, 0) + 1
+            vector = self._vector(entry.book_id, context)
+            if vector is not None:
+                chosen_vectors.append(vector)
+        return tuple(selected)
+
+    def _penalty(
+        self,
+        entry: RankedCandidate,
+        context: RerankContext,
+        authors: dict[str, int],
+        series: dict[str, int],
+        interests: dict[str, int],
+        sources: dict[str, int],
+        chosen_vectors: list[np.ndarray],
+        chosen_keys: set[tuple[str, str]],
+    ) -> tuple[float, tuple[str, ...]]:
+        config = context.surface.rerank
+        penalty = 0.0
+        reasons: list[str] = []
+        row = None if context.metadata is None else context.metadata.get(entry.book_id)
+        if row is not None:
+            key = duplicate_key(row.title, row.author)
+            if key is not None and key in chosen_keys and config.near_duplicate_penalty:
+                penalty += config.near_duplicate_penalty
+                reasons.append("duplicate work")
+            seen_author = authors.get(row.author, 0) if row.author else 0
+            if seen_author and config.author_penalty:
+                penalty += config.author_penalty * seen_author
+                reasons.append(f"author x{seen_author}")
+            name = series_of(row.title)
+            seen_series = series.get(name, 0) if name else 0
+            if seen_series and config.series_penalty:
+                penalty += config.series_penalty * seen_series
+                reasons.append(f"series x{seen_series}")
+        interest = self._interest(entry)
+        seen_interest = interests.get(interest, 0)
+        if seen_interest and config.interest_concentration_penalty:
+            penalty += config.interest_concentration_penalty * seen_interest
+            reasons.append(f"interest x{seen_interest}")
+        source = entry.fused.sources[0].generator if entry.fused.sources else ""
+        seen_source = sources.get(source, 0)
+        if seen_source and config.source_concentration_penalty:
+            penalty += config.source_concentration_penalty * seen_source
+            reasons.append(f"source x{seen_source}")
+        if chosen_vectors and config.near_duplicate_penalty:
+            vector = self._vector(entry.book_id, context)
+            if vector is not None:
+                similarity = float(np.max(np.asarray(chosen_vectors) @ vector))
+                if similarity >= config.near_duplicate_threshold:
+                    penalty += config.near_duplicate_penalty
+                    reasons.append(f"near-duplicate {similarity:.2f}")
+        return penalty, tuple(reasons)
+
+    @staticmethod
+    def _interest(entry: RankedCandidate) -> str:
+        return entry.fused.sources[0].provenance if entry.fused.sources else ""
+
+    @staticmethod
+    def _vector(book_id: int, context: RerankContext) -> np.ndarray | None:
+        if context.embeddings is None:
+            return None
+        vector = context.embeddings.vector_for(book_id)
+        return None if vector is None else np.asarray(vector, dtype=np.float64)
+
+
+#: A surface whose near-duplicate threshold the *fixture* can actually
+#: reach. `generator_world` puts within-group cosine at ~0.74, deliberately
+#: below the shipped 0.92, so a batch built from it never fires the
+#: similarity penalty at all — and an equivalence test that never fires the
+#: term it exists to check proves nothing. This surface lowers the threshold
+#: instead of loosening the fixture, which the fixture's own comment warns
+#: against.
+DUPLICATE_SENSITIVE = SurfaceConfig(
+    name="duplicate-sensitive",
+    quotas=(GeneratorQuota(generator="als", rrf_weight=1.0, count=50),),
+    ranking=RankingWeights(),
+    rerank=RerankConfig(
+        near_duplicate_threshold=0.5,
+        near_duplicate_penalty=1.0,
+        author_penalty=0.2,
+        series_penalty=0.3,
+        interest_concentration_penalty=0.15,
+        source_concentration_penalty=0.1,
+        exploration_slots=2,
+    ),
+)
+
+
+class TestOptimizedSelectionMatchesTheObviousOne:
+    """The R9 optimization is an optimization, and this is what says so."""
+
+    @pytest.mark.parametrize("seed", range(6))
+    @pytest.mark.parametrize(
+        "test_surface", [HOME_SURFACE, DUPLICATE_SENSITIVE], ids=["home", "duplicate-sensitive"]
+    )
+    def test_identical_selection_over_randomized_batches(
+        self, storage: LocalArtifactStorage, seed: int, test_surface: SurfaceConfig
+    ) -> None:
+        rng = np.random.default_rng(seed)
+        provenances = ("als", "item_cf", "interest:i1", "interest:i2", "popularity")
+        candidates = [
+            candidate(
+                int(book_id),
+                float(rng.uniform(0.1, 2.0)),
+                provenance=str(rng.choice(provenances)),
+            )
+            for book_id in rng.permutation(np.array(ALL_BOOKS))
+        ]
+        context = RerankContext(
+            surface=test_surface,
+            metadata=load_metadata(storage),
+            embeddings=load_content(storage),
+        )
+
+        fast = DiversityReranker().rerank(candidates, context=context, limit=8)
+        reference = ReferenceReranker().rerank(candidates, context=context, limit=8)
+
+        assert [c.book_id for c in fast] == [c.book_id for c in reference]
+        assert [round(c.penalty, 9) for c in fast] == [round(c.penalty, 9) for c in reference]
+        assert [c.reasons for c in fast] == [c.reasons for c in reference]
+        assert [c.exploration for c in fast] == [c.exploration for c in reference]
+
+    def test_the_similarity_penalty_actually_fires_in_these_fixtures(
+        self, storage: LocalArtifactStorage
+    ) -> None:
+        """Guards the guard.
+
+        Without this, the equivalence test above passes trivially whenever
+        no candidate pair reaches the threshold, which is exactly what
+        happened on the first version of it: a sabotaged running maximum
+        went undetected because the fixture's books are only 0.74 alike.
+        """
+        candidates = [candidate(book_id, 1.0) for book_id in ALL_BOOKS]
+        selected = DiversityReranker().rerank(
+            candidates,
+            context=RerankContext(
+                surface=DUPLICATE_SENSITIVE,
+                metadata=load_metadata(storage),
+                embeddings=load_content(storage),
+            ),
+            limit=8,
+        )
+        assert any(
+            reason.startswith("near-duplicate") for entry in selected for reason in entry.reasons
+        )
+
+    def test_reference_books_seed_the_running_maximum(self, storage: LocalArtifactStorage) -> None:
+        """The Similar Books case, where the duplicate check must fire before
+        anything at all has been selected (ADR-0024)."""
+        candidates = [candidate(book_id, 1.0) for book_id in (102, 105, 109)]
+        context = RerankContext(
+            surface=DUPLICATE_SENSITIVE,
+            metadata=load_metadata(storage),
+            embeddings=load_content(storage),
+            reference_book_ids=(101,),
+        )
+        fast = DiversityReranker().rerank(candidates, context=context, limit=3)
+        reference = ReferenceReranker().rerank(candidates, context=context, limit=3)
+        assert [c.book_id for c in fast] == [c.book_id for c in reference]
+        assert [c.reasons for c in fast] == [c.reasons for c in reference]
+        # The point of the case: 102 shares the fixture's fantasy axis with
+        # the reference book, so it must be penalized before anything is
+        # selected — which is only true if the reference seeding happened.
+        assert any(
+            reason.startswith("near-duplicate") for entry in fast for reason in entry.reasons
+        )

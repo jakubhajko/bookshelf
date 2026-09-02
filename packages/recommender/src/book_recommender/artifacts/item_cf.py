@@ -133,6 +133,10 @@ class ItemCfNeighbors:
             return ()
 
         totals: dict[int, float] = {}
+        #: How many distinct seeds reached this candidate.
+        agreement: dict[int, int] = {}
+        #: Best (smallest) position within any seed's neighbour row.
+        best_position: dict[int, int] = {}
         seed_ids = {book_id for book_id, _ in seeds}
         for seed_book_id, weight in seeds:
             if weight <= 0.0:
@@ -145,13 +149,44 @@ class ItemCfNeighbors:
                 totals[candidate] = totals.get(candidate, 0.0) + weight * float(
                     self._scores[offset]
                 )
+                agreement[candidate] = agreement.get(candidate, 0) + 1
+                position = offset - start
+                if position < best_position.get(candidate, position + 1):
+                    best_position[candidate] = position
 
         if not totals:
             return ()
-        # Sorted by score desc, then book_id asc — the tiebreak keeps the
-        # output deterministic, which matters because the engine's order is
-        # authoritative and nothing downstream re-sorts it (rec-spec §18).
-        ranked = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+        # Score desc, then agreement desc, then neighbour position asc, then
+        # book_id.
+        #
+        # The middle two replace what used to be a straight fall-through to
+        # `book_id` — catalog insertion order, which RRF would then read as
+        # rank and treat as evidence (ADR-0017). A book reachable from
+        # several of the reader's books is better evidence than one
+        # reachable from a single book, which is the premise of item-item
+        # CF; and rows are stored strongest-first, so position within a row
+        # is real signal too. `book_id` stays last because determinism must
+        # still be guaranteed when everything else ties (rec-spec §18).
+        #
+        # **This is not what fixed risk #111**, and the distinction matters
+        # to anyone tempted to tune here. R6 predicted the saturated-rank
+        # problem could be solved at this aggregation. R9 measured that it
+        # could not: the dominant tie group came from a *single* seed's row,
+        # so agreement was uniformly 1 and position was already the order
+        # being complained about. The cause was upstream — edges whose only
+        # evidence was one reader owning both books — and the fix is the
+        # builder's `min_support` filter (`cf_training.train_item_neighbors`).
+        # These tiebreaks handle the multi-seed ties that remain, which on
+        # the live reader is now a largest group of 2 rather than 74.
+        ranked = sorted(
+            totals.items(),
+            key=lambda item: (
+                -item[1],
+                -agreement[item[0]],
+                best_position[item[0]],
+                item[0],
+            ),
+        )
         return tuple(ranked[:count])
 
     def _slice(self, book_id: int, limit: int | None) -> tuple[int, int]:

@@ -156,8 +156,41 @@ class Reranker(Protocol):
     ) -> tuple[RerankedCandidate, ...]: ...
 
 
+@dataclass(frozen=True)
+class _CandidateFacts:
+    """Everything about one candidate that selection cannot change.
+
+    Read once per candidate instead of once per candidate per step. The
+    difference is not cosmetic: a Home batch is 60 slots over ~600
+    candidates, so the naive loop parses the same title with two regexes
+    36,000 times and reads the same embedding row 36,000 times.
+    """
+
+    author: str
+    series: str | None
+    key: tuple[str, str] | None
+    interest: str
+    source: str
+    #: False when this book has no embedding — books added to the catalog
+    #: since the content artifact was built. Its duplicate similarity is
+    #: never compared, exactly as before.
+    has_vector: bool
+
+
 class DiversityReranker:
-    """Greedy MMR-like selection under the surface's diversity policy."""
+    """Greedy MMR-like selection under the surface's diversity policy.
+
+    **Greedy, but not quadratic in vector work.** The selection rule is
+    unchanged from the obvious implementation — at each step, penalize every
+    remaining candidate by what has already been chosen and take the best —
+    but the near-duplicate term is maintained incrementally. A candidate's
+    duplicate penalty depends on ``max(cosine to each selected book)``, and
+    a max over a growing set only ever needs the new member: one
+    matrix-vector product against all remaining candidates per selection
+    step, rather than one matrix rebuild per candidate per step. The
+    arithmetic is identical; on a real Home batch it is the difference
+    between ~450 ms and ~15 ms (plan.md §5s).
+    """
 
     def rerank(
         self,
@@ -173,25 +206,31 @@ class DiversityReranker:
         remaining = list(candidates)
         selected: list[RerankedCandidate] = []
 
+        vectors, facts = self._prepare(remaining, context)
+        remaining_facts = list(facts)
+
         # Selection state, all keyed on what has already been chosen.
         authors: dict[str, int] = {}
         series: dict[str, int] = {}
         interests: dict[str, int] = {}
         sources: dict[str, int] = {}
+        chosen_keys: set[tuple[str, str]] = set()
+        # Best cosine from each remaining candidate to anything already
+        # chosen. -inf means "nothing to compare against yet", which is
+        # distinct from a genuine similarity of 0.
+        best_similarity = np.full(len(remaining), -np.inf, dtype=np.float64)
+
         # Both duplicate checks are seeded with the surface's reference
         # books, so a candidate duplicating the source book is caught before
         # anything at all has been selected.
-        chosen_vectors: list[np.ndarray] = [
-            vector
-            for vector in (self._vector(book_id, context) for book_id in context.reference_book_ids)
-            if vector is not None
-        ]
-        chosen_keys: set[tuple[str, str]] = set()
         for book_id in context.reference_book_ids:
             row = self._metadata_row(book_id, context)
             key = None if row is None else duplicate_key(row.title, row.author)
             if key is not None:
                 chosen_keys.add(key)
+            vector = self._vector(book_id, context)
+            if vector is not None and vectors is not None:
+                np.maximum(best_similarity, vectors @ vector, out=best_similarity)
 
         explore_after = max(limit - config.exploration_slots, 0)
 
@@ -208,16 +247,17 @@ class DiversityReranker:
             for index, candidate in enumerate(remaining):
                 penalty, reasons = self._penalty(
                     candidate,
+                    facts=remaining_facts[index],
+                    similarity=float(best_similarity[index]),
                     context=context,
                     authors=authors,
                     series=series,
                     interests=interests,
                     sources=sources,
-                    chosen_vectors=chosen_vectors,
                     chosen_keys=chosen_keys,
                 )
                 value = candidate.score - penalty
-                if want_exploration and self._interest_of(candidate) in interests:
+                if want_exploration and remaining_facts[index].interest in interests:
                     # Reserved slots go to an interest not yet represented —
                     # rec-spec §15's exploration, which is about coverage and
                     # has nothing to do with popularity.
@@ -227,7 +267,13 @@ class DiversityReranker:
                     best_penalty, best_reasons = penalty, reasons
 
             candidate = remaining.pop(best_index)
-            interest = self._interest_of(candidate)
+            chosen = remaining_facts.pop(best_index)
+            chosen_vector = (
+                vectors[best_index].copy() if vectors is not None and chosen.has_vector else None
+            )
+            best_similarity = np.delete(best_similarity, best_index)
+            if vectors is not None:
+                vectors = np.delete(vectors, best_index, axis=0)
             selected.append(
                 RerankedCandidate(
                     book_id=candidate.book_id,
@@ -235,28 +281,73 @@ class DiversityReranker:
                     ranked=candidate,
                     penalty=best_penalty,
                     reasons=best_reasons,
-                    exploration=want_exploration and interest not in interests,
+                    exploration=want_exploration and chosen.interest not in interests,
                 )
             )
 
-            row = self._metadata_row(candidate.book_id, context)
-            if row is not None:
-                if row.author:
-                    authors[row.author] = authors.get(row.author, 0) + 1
-                name = series_of(row.title)
-                if name:
-                    series[name] = series.get(name, 0) + 1
-                key = duplicate_key(row.title, row.author)
-                if key is not None:
-                    chosen_keys.add(key)
-            interests[interest] = interests.get(interest, 0) + 1
-            source = candidate.fused.sources[0].generator if candidate.fused.sources else ""
-            sources[source] = sources.get(source, 0) + 1
-            vector = self._vector(candidate.book_id, context)
-            if vector is not None:
-                chosen_vectors.append(vector)
+            if chosen.author:
+                authors[chosen.author] = authors.get(chosen.author, 0) + 1
+            if chosen.series:
+                series[chosen.series] = series.get(chosen.series, 0) + 1
+            if chosen.key is not None:
+                chosen_keys.add(chosen.key)
+            interests[chosen.interest] = interests.get(chosen.interest, 0) + 1
+            sources[chosen.source] = sources.get(chosen.source, 0) + 1
+            # One matrix-vector product folds the newly selected book into
+            # every remaining candidate's running maximum. This is the whole
+            # optimization: `max` over a growing set only needs its newest
+            # member.
+            if vectors is not None and chosen_vector is not None:
+                np.maximum(best_similarity, vectors @ chosen_vector, out=best_similarity)
 
         return tuple(selected)
+
+    # --- preparation ------------------------------------------------------
+
+    def _prepare(
+        self, candidates: Sequence[RankedCandidate], context: RerankContext
+    ) -> tuple[np.ndarray | None, tuple[_CandidateFacts, ...]]:
+        """Per-candidate constants, and their vectors as one dense matrix.
+
+        The matrix is row-aligned with the candidate list — a candidate
+        without an embedding gets a zero row and ``has_vector=False``, so its
+        similarity is never compared. Padding rather than compaction keeps
+        row *i* the vector of candidate *i*, which is what lets a selection
+        delete from the list, the matrix and the running maximum with one
+        index.
+        """
+        embeddings: ContentEmbeddings | None = context.embeddings
+        facts: list[_CandidateFacts] = []
+        rows: list[np.ndarray] = []
+        dimension = 0
+
+        for candidate in candidates:
+            row = self._metadata_row(candidate.book_id, context)
+            vector = self._vector(candidate.book_id, context)
+            if vector is not None:
+                dimension = vector.size
+            rows.append(vector if vector is not None else np.empty(0))
+            facts.append(
+                _CandidateFacts(
+                    author=row.author if row is not None else "",
+                    series=series_of(row.title) if row is not None else None,
+                    key=duplicate_key(row.title, row.author) if row is not None else None,
+                    interest=self._interest_of(candidate),
+                    source=(
+                        candidate.fused.sources[0].generator if candidate.fused.sources else ""
+                    ),
+                    has_vector=vector is not None,
+                )
+            )
+
+        if embeddings is None or dimension == 0:
+            return (None, tuple(facts))
+
+        matrix = np.zeros((len(candidates), dimension), dtype=np.float64)
+        for index, vector in enumerate(rows):
+            if vector.size:
+                matrix[index] = vector
+        return (matrix, tuple(facts))
 
     # --- penalties --------------------------------------------------------
 
@@ -264,57 +355,52 @@ class DiversityReranker:
         self,
         candidate: RankedCandidate,
         *,
+        facts: _CandidateFacts,
+        similarity: float,
         context: RerankContext,
         authors: dict[str, int],
         series: dict[str, int],
         interests: dict[str, int],
         sources: dict[str, int],
-        chosen_vectors: list[np.ndarray],
         chosen_keys: set[tuple[str, str]],
     ) -> tuple[float, tuple[str, ...]]:
         config = context.surface.rerank
         penalty = 0.0
         reasons: list[str] = []
 
-        row = self._metadata_row(candidate.book_id, context)
-        if row is not None:
-            key = duplicate_key(row.title, row.author)
-            if key is not None and key in chosen_keys and config.near_duplicate_penalty:
-                # Same work under a different catalog row. Cosine misses
-                # this entirely — see `duplicate_key` for the measurement.
-                penalty += config.near_duplicate_penalty
-                reasons.append("duplicate work")
-            seen_author = authors.get(row.author, 0) if row.author else 0
-            if seen_author and config.author_penalty:
-                penalty += config.author_penalty * seen_author
-                reasons.append(f"author x{seen_author}")
-            name = series_of(row.title)
-            seen_series = series.get(name, 0) if name else 0
-            if seen_series and config.series_penalty:
-                penalty += config.series_penalty * seen_series
-                reasons.append(f"series x{seen_series}")
+        if facts.key is not None and facts.key in chosen_keys and config.near_duplicate_penalty:
+            # Same work under a different catalog row. Cosine misses this
+            # entirely — see `duplicate_key` for the measurement.
+            penalty += config.near_duplicate_penalty
+            reasons.append("duplicate work")
+        seen_author = authors.get(facts.author, 0) if facts.author else 0
+        if seen_author and config.author_penalty:
+            penalty += config.author_penalty * seen_author
+            reasons.append(f"author x{seen_author}")
+        seen_series = series.get(facts.series, 0) if facts.series else 0
+        if seen_series and config.series_penalty:
+            penalty += config.series_penalty * seen_series
+            reasons.append(f"series x{seen_series}")
 
-        interest = self._interest_of(candidate)
-        seen_interest = interests.get(interest, 0)
+        seen_interest = interests.get(facts.interest, 0)
         if seen_interest and config.interest_concentration_penalty:
             penalty += config.interest_concentration_penalty * seen_interest
             reasons.append(f"interest x{seen_interest}")
 
-        source = candidate.fused.sources[0].generator if candidate.fused.sources else ""
-        seen_source = sources.get(source, 0)
+        seen_source = sources.get(facts.source, 0)
         if seen_source and config.source_concentration_penalty:
             penalty += config.source_concentration_penalty * seen_source
             reasons.append(f"source x{seen_source}")
 
-        if chosen_vectors and config.near_duplicate_penalty:
-            vector = self._vector(candidate.book_id, context)
-            if vector is not None:
-                similarity = float(np.max(np.asarray(chosen_vectors) @ vector))
-                if similarity >= config.near_duplicate_threshold:
-                    # The 'Dune' / 'Dune *' case: a genuinely separate
-                    # catalog row for what is effectively the same work.
-                    penalty += config.near_duplicate_penalty
-                    reasons.append(f"near-duplicate {similarity:.2f}")
+        if (
+            config.near_duplicate_penalty
+            and facts.has_vector
+            and similarity >= config.near_duplicate_threshold
+        ):
+            # The 'Dune' / 'Dune *' case: a genuinely separate catalog row
+            # for what is effectively the same work.
+            penalty += config.near_duplicate_penalty
+            reasons.append(f"near-duplicate {similarity:.2f}")
 
         return penalty, tuple(reasons)
 
