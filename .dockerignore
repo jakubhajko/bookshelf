@@ -15,5 +15,7 @@
 data/raw
 data/processed
 data/notebooks
+# Evaluation reports are offline diagnostics, never read at runtime:
+data/artifacts/evaluation
 .DS_Store
 .env

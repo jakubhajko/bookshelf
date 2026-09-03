@@ -56,7 +56,7 @@ _HASH_CHUNK_BYTES = 1024 * 1024
 #: Six families, at most a couple of files each — enough workers that no
 #: transfer waits on another, few enough that we are not opening dozens of TLS
 #: connections on a container that is trying to start quickly.
-_SYNC_CONCURRENCY = 8
+_SYNC_CONCURRENCY = 4
 
 
 class ArtifactSyncError(RuntimeError):
@@ -199,7 +199,17 @@ def sync_artifacts(settings: Settings, client: _ObjectGetter | None = None) -> P
         except ValueError as exc:
             raise ArtifactSyncError(f"unreadable manifest for {family.name}: {exc}") from exc
 
-    manifests = _run_all(fetch_manifest, list(FAMILIES.values()))
+    # The first manifest is fetched on this thread, alone, before any pool is
+    # started. A freshly constructed boto3 client does its real initialisation
+    # lazily on the first call — loading service models, resolving the endpoint
+    # and the credential chain — and driving that from several threads at once
+    # deadlocks: the container logs "Waiting for application startup" and then
+    # nothing at all, until Cloud Run's startup probe gives up. Observed on
+    # revision 00003; the unit tests missed it because they inject a fake
+    # client and never touch boto3. One serial call is enough to warm it.
+    families = list(FAMILIES.values())
+    manifests = [fetch_manifest(families[0])]
+    manifests.extend(_run_all(fetch_manifest, families[1:]))
 
     # --- Pass 2: decide what is actually missing ----------------------------
     pending: list[tuple[ArtifactFamily, str, str, int]] = []

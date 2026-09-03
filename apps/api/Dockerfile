@@ -76,6 +76,30 @@ COPY --chown=appuser:appuser apps/api ./apps/api
 COPY --chown=appuser:appuser packages/recommender ./packages/recommender
 RUN uv sync --package book-app --no-dev
 
+# Model artifacts ship *inside* the image (~244 MB), rather than being fetched
+# from object storage when a container starts.
+#
+# The R2 sync in shared/storage/s3_artifacts.py still exists and still works —
+# it is how artifacts reach a machine that has none, and it stays the path for
+# any deployment that would rather not carry them in the image. It is simply
+# not what production uses, because it was measured and it is too slow:
+# downloading 244 MB from R2 on every cold start took 82-203 s (seven samples),
+# at roughly 1.5-3 MB/s, and neither parallelising the transfers nor doubling
+# the vCPU changed that. Cloud Run pulling the same bytes from Artifact
+# Registry travels Google's own network instead of the public internet.
+#
+# The cost is that artifacts are now versioned *with* the code: changing a
+# model means rebuilding and redeploying the image. For a recommender whose
+# artifacts must already agree with the catalog they were trained against
+# (ADR-0014, ADR-0020), coupling them to a deploy is arguably more correct
+# than letting them drift independently.
+#
+# Requires data/artifacts/ to exist in the build context — `make
+# build-recommender-artifacts`, or a download from R2. A missing directory
+# fails the build loudly rather than producing an image that degrades at
+# runtime.
+COPY --chown=appuser:appuser data/artifacts ./data/artifacts
+
 # No --reload, and explicitly not `uv run` (which would want dev-group
 # resolution available) — invoke the installed venv's uvicorn directly.
 # Cloud Run injects $PORT (usually 8080) and requires the server to listen on
