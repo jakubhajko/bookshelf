@@ -10,9 +10,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DATABASE_URL: postgresql+psycopg://book_app:book_app@localhost:5432/book_app
-  PGHOST: localhost
-  PGPORT: "5432"
+  DATABASE_URL: postgresql+psycopg://book_app:book_app@127.0.0.1:5433/book_app
+  # 127.0.0.1 rather than localhost: localhost can resolve to ::1 first, and
+  # the Docker port publish is IPv4 — the same IPv4/IPv6 split that makes two
+  # servers look like one.
+  PGHOST: 127.0.0.1
+  PGPORT: "5433"
   PGUSER: book_app
   PGPASSWORD: book_app
   PGDATABASE: book_app
@@ -33,7 +36,11 @@ jobs:
           POSTGRES_PASSWORD: book_app
           POSTGRES_DB: book_app
         ports:
-          - 5432:5432
+          # 5433 on the host, not 5432: the runner image ships its own
+          # PostgreSQL, and when both listen on 5432 `psql` and psycopg can
+          # reach *different* servers — which showed up as `psql` succeeding
+          # while the integration tests failed to authenticate as book_app.
+          - 5433:5432
         options: >-
           --health-cmd "pg_isready -U book_app -d book_app"
           --health-interval 5s
@@ -51,6 +58,14 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --all-packages
+
+      # Cheap insurance: if the integration tests ever fail to authenticate
+      # again, this says immediately whether they are talking to the service
+      # container or to something else the runner is running.
+      - name: Show what is listening on Postgres ports
+        run: |
+          ss -ltnp 2>/dev/null | grep -E '543[0-9]' || echo "(nothing on 543x)"
+          psql -tAc "select 'connected to ' || version()" || true
 
       - name: Enable pg_trgm
         run: psql -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
@@ -155,7 +170,11 @@ jobs:
           POSTGRES_PASSWORD: book_app
           POSTGRES_DB: book_app
         ports:
-          - 5432:5432
+          # 5433 on the host, not 5432: the runner image ships its own
+          # PostgreSQL, and when both listen on 5432 `psql` and psycopg can
+          # reach *different* servers — which showed up as `psql` succeeding
+          # while the integration tests failed to authenticate as book_app.
+          - 5433:5432
         options: >-
           --health-cmd "pg_isready -U book_app -d book_app"
           --health-interval 5s
