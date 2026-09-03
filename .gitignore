@@ -44,6 +44,9 @@ apps/web/test-results/
 apps/web/openapi.json
 apps/web/src/api/generated/
 
+# Wrangler's local state/cache for `wrangler pages dev` (Cloudflare Pages):
+apps/web/.wrangler/
+
 # --- Env / secrets ---
 .env
 .env.local

@@ -164,3 +164,38 @@ def test_unreadable_manifest_raises(tmp_path: Path, bucket: Path) -> None:
 def test_s3_backend_without_credentials_is_rejected_at_config_time() -> None:
     with pytest.raises(ValueError, match="ARTIFACT_STORAGE_S3_BUCKET"):
         Settings(artifact_storage_backend="s3")
+
+
+def test_downloads_run_concurrently(tmp_path: Path, bucket: Path) -> None:
+    """The sync must not serialise transfers.
+
+    In production one 45.7 MB family took 60 s while a 181 MB one took 3 s on
+    the same cold start — a slow connection, not a big file. Serially that one
+    transfer sets the floor for how long a visitor waits after a scale-to-zero,
+    so parallelism here is a user-visible property, not an optimisation.
+    """
+    import threading
+
+    class ConcurrencyTrackingS3(FakeS3):
+        def __init__(self, source: Path) -> None:
+            super().__init__(source)
+            self._lock = threading.Lock()
+            self._in_flight = 0
+            self.peak_in_flight = 0
+
+        def download_file(self, Bucket: str, Key: str, Filename: str) -> None:  # noqa: N803
+            with self._lock:
+                self._in_flight += 1
+                self.peak_in_flight = max(self.peak_in_flight, self._in_flight)
+            try:
+                # Long enough that a serial implementation cannot overlap them.
+                threading.Event().wait(0.05)
+                super().download_file(Bucket=Bucket, Key=Key, Filename=Filename)
+            finally:
+                with self._lock:
+                    self._in_flight -= 1
+
+    client = ConcurrencyTrackingS3(bucket)
+    sync_artifacts(_settings(tmp_path), client)
+
+    assert client.peak_in_flight > 1, "artifact downloads ran one at a time"

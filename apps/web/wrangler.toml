@@ -1,0 +1,17 @@
+# Cloudflare Pages project configuration.
+#
+# `compatibility_date` pins which version of the Workers runtime the Pages
+# Function in functions/ executes against. It is not optional in practice:
+# without it the runtime falls back to legacy behaviour in which this proxy's
+# `fetch(..., { redirect: 'manual' })` hangs instead of returning, with no
+# error logged anywhere. Verified locally — `wrangler pages dev` reproduced the
+# hang exactly until this date was set.
+name = "bookshelf"
+compatibility_date = "2026-09-01"
+pages_build_output_dir = "dist"
+
+# Where the Pages Function forwards /api/* to. Public information — this URL
+# is discoverable from any deployed frontend — so it lives in the tracked
+# config rather than in a secret store. Secrets stay in Cloud Run.
+[vars]
+API_ORIGIN = "https://bookshelf-api-413537539314.europe-west2.run.app"

@@ -33,11 +33,13 @@ genuinely absent or stale — and does not get quietly overloaded to mean
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 from book_recommender.artifacts.manifest import ArtifactManifest
-from book_recommender.config import FAMILIES
+from book_recommender.config import FAMILIES, ArtifactFamily
 
 from book_app.core.logging import get_logger
 
@@ -51,6 +53,10 @@ MANIFEST_FILENAME = "manifest.json"
 #: Cloud Run the destination is a tmpfs, so a second full copy in memory during
 #: hashing would be 181 MB of the instance's memory limit for no reason.
 _HASH_CHUNK_BYTES = 1024 * 1024
+#: Six families, at most a couple of files each — enough workers that no
+#: transfer waits on another, few enough that we are not opening dozens of TLS
+#: connections on a container that is trying to start quickly.
+_SYNC_CONCURRENCY = 8
 
 
 class ArtifactSyncError(RuntimeError):
@@ -91,6 +97,31 @@ def build_s3_client(settings: Settings) -> _ObjectGetter:
             max_pool_connections=64,
         ),
     )
+
+
+def _run_all[T, R](work: Callable[[T], R], items: Sequence[T]) -> list[R]:
+    """Run ``work`` over ``items`` concurrently, preserving input order.
+
+    Every task is awaited before anything is raised, so a failure cannot leave
+    sibling downloads writing into the cache directory after the caller has
+    already given up on the sync. The first failure is the one re-raised —
+    later ones are almost always the same root cause (a bad credential, a
+    missing prefix) reported six times.
+    """
+    if not items:
+        return []
+    results: list[R | None] = [None] * len(items)
+    errors: list[BaseException] = []
+    with ThreadPoolExecutor(max_workers=min(_SYNC_CONCURRENCY, len(items))) as pool:
+        futures = {pool.submit(work, item): index for index, item in enumerate(items)}
+        for future in as_completed(futures):
+            try:
+                results[futures[future]] = future.result()
+            except BaseException as exc:  # noqa: BLE001 - re-raised below, in order
+                errors.append(exc)
+    if errors:
+        raise errors[0]
+    return cast("list[R]", results)
 
 
 def _sha256(path: Path) -> str:
@@ -149,41 +180,59 @@ def sync_artifacts(settings: Settings, client: _ObjectGetter | None = None) -> P
     resolved = client if client is not None else build_s3_client(settings)
     root = settings.artifact_cache_dir
     root.mkdir(parents=True, exist_ok=True)
+    prefix = settings.artifact_storage_s3_prefix
 
-    downloaded = reused = 0
-    total_bytes = 0
-
-    for family in FAMILIES.values():
+    # --- Pass 1: manifests, in parallel -------------------------------------
+    # Always re-fetched: ~4 KB each, and each is what proves the much larger
+    # files beside it are current.
+    def fetch_manifest(family: ArtifactFamily) -> tuple[ArtifactFamily, ArtifactManifest]:
         manifest_path = root / family.directory / MANIFEST_FILENAME
-        # The manifest is always re-fetched: it is ~4 KB and it is the thing
-        # that tells us whether the (much larger) files beside it are current.
         _download(
             resolved,
             bucket,
-            _object_key(settings.artifact_storage_s3_prefix, family.directory, MANIFEST_FILENAME),
+            _object_key(prefix, family.directory, MANIFEST_FILENAME),
             manifest_path,
             expected_sha256=None,
         )
         try:
-            manifest = ArtifactManifest.model_validate_json(manifest_path.read_text())
+            return family, ArtifactManifest.model_validate_json(manifest_path.read_text())
         except ValueError as exc:
             raise ArtifactSyncError(f"unreadable manifest for {family.name}: {exc}") from exc
 
+    manifests = _run_all(fetch_manifest, list(FAMILIES.values()))
+
+    # --- Pass 2: decide what is actually missing ----------------------------
+    pending: list[tuple[ArtifactFamily, str, str, int]] = []
+    reused = 0
+    for family, manifest in manifests:
         for entry in manifest.files:
             destination = root / family.directory / entry.name
             if destination.is_file() and _sha256(destination) == entry.sha256:
                 reused += 1
                 continue
-            _download(
-                resolved,
-                bucket,
-                _object_key(settings.artifact_storage_s3_prefix, family.directory, entry.name),
-                destination,
-                expected_sha256=entry.sha256,
-            )
-            downloaded += 1
-            total_bytes += entry.size_bytes
+            pending.append((family, entry.name, entry.sha256, entry.size_bytes))
 
+    # --- Pass 3: download everything missing, in parallel -------------------
+    # Serially, one slow transfer stalls the whole startup: in production the
+    # 45.7 MB ALS factors took 60 s while the 181 MB content matrix took 3 s
+    # on the same cold start — a connection problem, not a size one. Six
+    # concurrent transfers mean a single slow one no longer sets the floor for
+    # how long a visitor waits for the first request after a scale-to-zero.
+    def fetch_file(item: tuple[ArtifactFamily, str, str, int]) -> None:
+        family, name, sha256, _size = item
+        _download(
+            resolved,
+            bucket,
+            _object_key(prefix, family.directory, name),
+            root / family.directory / name,
+            expected_sha256=sha256,
+        )
+
+    _run_all(fetch_file, pending)
+    downloaded = len(pending)
+    total_bytes = sum(size for _, _, _, size in pending)
+
+    for family, manifest in manifests:
         logger.info(
             "artifact_family_synced",
             family=family.name,
