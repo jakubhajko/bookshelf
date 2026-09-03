@@ -54,7 +54,21 @@ def _run_alembic(*args: str, database_url: str) -> None:
 
 @pytest.fixture(scope="session")
 def test_database_url() -> str:
-    return str(make_url(_base_url()).set(database=TEST_DB_NAME))
+    """The base URL with the database swapped for the throwaway test one.
+
+    ``render_as_string(hide_password=False)`` rather than ``str(url)``:
+    SQLAlchemy's ``__str__`` deliberately renders the password as ``***`` so
+    it cannot leak into logs and reprs, which means ``str(url)`` produces a
+    connection string whose password is the literal three characters ``***``.
+
+    That was invisible for as long as this only ran against a developer's
+    project-local cluster, whose ``pg_hba.conf`` is ``trust`` — no password is
+    ever checked, so a wrong one works fine. Against any Postgres that
+    actually authenticates (the CI service container, and every managed
+    database) it fails with "password authentication failed", which is what
+    CI had been reporting on every push since August.
+    """
+    return make_url(_base_url()).set(database=TEST_DB_NAME).render_as_string(hide_password=False)
 
 
 @pytest.fixture

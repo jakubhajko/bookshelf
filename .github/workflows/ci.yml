@@ -11,9 +11,8 @@ concurrency:
 
 env:
   DATABASE_URL: postgresql+psycopg://book_app:book_app@127.0.0.1:5433/book_app
-  # 127.0.0.1 rather than localhost: localhost can resolve to ::1 first, and
-  # the Docker port publish is IPv4 — the same IPv4/IPv6 split that makes two
-  # servers look like one.
+  # 127.0.0.1 rather than localhost, so a host resolving to ::1 first cannot
+  # reach a different listener than the one the port publish created.
   PGHOST: 127.0.0.1
   PGPORT: "5433"
   PGUSER: book_app
@@ -36,10 +35,11 @@ jobs:
           POSTGRES_PASSWORD: book_app
           POSTGRES_DB: book_app
         ports:
-          # 5433 on the host, not 5432: the runner image ships its own
-          # PostgreSQL, and when both listen on 5432 `psql` and psycopg can
-          # reach *different* servers — which showed up as `psql` succeeding
-          # while the integration tests failed to authenticate as book_app.
+          # A non-default host port, so this service can never collide with
+          # a Postgres the runner image happens to provide. Defensive only —
+          # the authentication failures this workflow used to report came
+          # from tests/integration/conftest.py rendering its password as
+          # `***`, not from a port collision.
           - 5433:5432
         options: >-
           --health-cmd "pg_isready -U book_app -d book_app"
@@ -143,6 +143,30 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # apps/web/src/api/generated/ is gitignored — it is derived from the
+      # backend's OpenAPI schema, not authored (ADR-0002, `make
+      # generate-api-client`). CI has to produce it before anything can
+      # typecheck, and generating it here is also a real check: if a backend
+      # route changes shape and the frontend was not updated, the typecheck
+      # fails, which is the point of generating the client rather than
+      # hand-writing it.
+      #
+      # No database needed — `create_app()` deliberately does no DB work, so
+      # the schema can be dumped from a bare process.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.10.4"
+          enable-cache: true
+
+      - name: Generate the typed API client from the backend schema
+        working-directory: .
+        env:
+          DATABASE_URL: postgresql+psycopg://unused:unused@127.0.0.1:1/unused
+        run: |
+          uv run --project apps/api python -m book_app.cli.export_openapi
+          cd apps/web && npm run generate-api-client
+
       - name: Lint
         run: npm run lint
 
@@ -170,10 +194,11 @@ jobs:
           POSTGRES_PASSWORD: book_app
           POSTGRES_DB: book_app
         ports:
-          # 5433 on the host, not 5432: the runner image ships its own
-          # PostgreSQL, and when both listen on 5432 `psql` and psycopg can
-          # reach *different* servers — which showed up as `psql` succeeding
-          # while the integration tests failed to authenticate as book_app.
+          # A non-default host port, so this service can never collide with
+          # a Postgres the runner image happens to provide. Defensive only —
+          # the authentication failures this workflow used to report came
+          # from tests/integration/conftest.py rendering its password as
+          # `***`, not from a port collision.
           - 5433:5432
         options: >-
           --health-cmd "pg_isready -U book_app -d book_app"
@@ -202,6 +227,13 @@ jobs:
 
       - name: Install frontend dependencies
         run: cd apps/web && npm ci
+
+      - name: Generate the typed API client from the backend schema
+        env:
+          DATABASE_URL: postgresql+psycopg://unused:unused@127.0.0.1:1/unused
+        run: |
+          uv run --project apps/api python -m book_app.cli.export_openapi
+          cd apps/web && npm run generate-api-client
 
       - name: Install Playwright's Chromium (+ OS deps, fresh runner)
         run: cd apps/web && npx playwright install --with-deps chromium
