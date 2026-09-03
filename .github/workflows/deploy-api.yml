@@ -1,0 +1,134 @@
+# Deploy the API to Cloud Run.
+#
+#   push to main -> ci.yml must pass -> fetch artifacts -> build -> push -> deploy
+#
+# Deliberately a SEPARATE workflow from ci.yml rather than extra jobs inside
+# it: ci.yml runs on every pull request, and a pull request must never deploy.
+# `workflow_run` makes the dependency explicit — this only starts once CI has
+# actually concluded, and the first step checks it concluded *successfully*.
+#
+# What this workflow does NOT do: run database migrations. Those stay a
+# deliberate one-off (`make migrate`, ADR-0009). A deploy that silently
+# migrates is how a bad migration reaches production at 2am with nobody
+# watching. Schema changes and code deploys have different blast radii and
+# different rollback stories, so they get different buttons.
+name: Deploy API
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  # Manual trigger, for redeploying without a code change (a rollback rebuild,
+  # or re-running after fixing something outside the repo).
+  workflow_dispatch:
+
+concurrency:
+  # Never let two deploys race to become the live revision.
+  group: deploy-api
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # Required for Workload Identity Federation: lets the job mint the OIDC
+  # token Google exchanges for short-lived credentials. There is no service
+  # account key stored anywhere in this repository.
+  id-token: write
+
+jobs:
+  deploy:
+    name: Build and deploy to Cloud Run
+    runs-on: ubuntu-latest
+    # A red CI run must not reach production. workflow_run fires on *any*
+    # conclusion, including failure, so this condition is what actually
+    # enforces the gate.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # For workflow_run, the default checkout is the *default branch tip*,
+          # which is not necessarily the commit CI just validated. Pin to the
+          # exact commit so the image tag genuinely identifies what is inside.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Resolve the commit being deployed
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.10.4"
+
+      # Artifacts are ~244 MB and gitignored, but the production image bakes
+      # them in (see apps/api/Dockerfile). They come from R2 with the
+      # READ-ONLY token — the same credential the API used to use at startup,
+      # which cannot write or delete anything.
+      - name: Fetch recommender artifacts from object storage
+        env:
+          ARTIFACT_STORAGE_BACKEND: s3
+          ARTIFACT_STORAGE_S3_BUCKET: ${{ vars.R2_ARTIFACTS_BUCKET }}
+          ARTIFACT_STORAGE_S3_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          ARTIFACT_STORAGE_S3_ACCESS_KEY_ID: ${{ secrets.R2_READONLY_ACCESS_KEY_ID }}
+          ARTIFACT_STORAGE_S3_SECRET_ACCESS_KEY: ${{ secrets.R2_READONLY_SECRET_ACCESS_KEY }}
+          # Every Settings field is settable from the environment, so the
+          # download lands exactly where the Dockerfile's COPY expects it.
+          ARTIFACT_CACHE_DIR: data/artifacts
+        run: |
+          uv run --project apps/api python -c \
+            "from book_app.core.config import get_settings; \
+             from book_app.core.logging import configure_logging; \
+             from book_app.shared.storage.s3_artifacts import sync_artifacts; \
+             s = get_settings(); configure_logging(s); sync_artifacts(s)"
+          du -sh data/artifacts
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ vars.GCP_REGION }}-docker.pkg.dev --quiet
+
+      # Runners are x86, so this is a native build — roughly 2 minutes, versus
+      # ~10 under QEMU emulation on an Apple Silicon machine.
+      - name: Build and push image
+        id: image
+        env:
+          IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/bookshelf/api:${{ steps.sha.outputs.short }}
+        run: |
+          docker build --target production -f apps/api/Dockerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "ref=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${{ vars.CLOUD_RUN_SERVICE }}" \
+            --image="${{ steps.image.outputs.ref }}" \
+            --region="${{ vars.GCP_REGION }}" \
+            --service-account="${{ vars.GCP_RUNTIME_SA }}" \
+            --quiet
+
+      # A deploy that "succeeded" but serves errors is not a successful deploy.
+      # Cloud Run already refuses to route traffic to a revision that fails its
+      # startup probe, so this is the second gate: the new revision is actually
+      # answering, and can actually reach its database.
+      - name: Verify the deployed revision is healthy
+        run: |
+          URL=$(gcloud run services describe "${{ vars.CLOUD_RUN_SERVICE }}" \
+                  --region="${{ vars.GCP_REGION }}" --format="value(status.url)")
+          echo "deployed: $URL"
+          for attempt in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$URL/api/v1/health/ready" || echo 000)
+            echo "  attempt $attempt: $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 10
+          done
+          echo "::error::/health/ready never returned 200 after deploy"
+          exit 1
