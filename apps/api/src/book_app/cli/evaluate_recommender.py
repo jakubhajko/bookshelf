@@ -975,7 +975,7 @@ def main(argv: list[str] | None = None) -> int:
 
     db_engine = create_db_engine(settings)
     session_factory = create_session_factory(db_engine)
-    storage = build_artifact_storage(settings.artifact_storage_local_path)
+    storage = build_artifact_storage(settings)
 
     try:
         with session_factory() as session:

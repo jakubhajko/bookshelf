@@ -202,7 +202,7 @@ def build_recommendation_provider(
     closed before any engine exists — inference itself stays database-free
     (ADR-0007, ADR-0014).
     """
-    storage = build_artifact_storage(settings.artifact_storage_local_path)
+    storage = build_artifact_storage(settings)
 
     def _load_popularity_artifact(
         artifact_storage: LocalArtifactStorage,

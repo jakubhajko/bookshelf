@@ -24,9 +24,10 @@ See ADR-0011.
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from book_app.core.exceptions import CoverNotFoundError
 from book_app.shared.storage.base import UnsafeObjectKeyError
@@ -61,10 +62,68 @@ def get_cover_storage(request: Request) -> LocalFileStorage:
     return storage
 
 
-@router.get("/{object_key}")
+#: A day. Long enough that a browser re-visiting the app does not re-ask the
+#: API for a redirect it already has; short enough that repointing
+#: ``cover_storage_public_base_url`` takes effect without a cache-busting
+#: scheme. Cover bytes themselves are immutable — the CDN caches those.
+_REDIRECT_CACHE_SECONDS = 86_400
+
+
+def _public_cover_url(base_url: str, object_key: str) -> str:
+    """Build the public URL for a cover, refusing anything but a plain name.
+
+    ``LocalFileStorage.resolve`` guards the local backend by checking the
+    resolved path stays under the storage root — a filesystem concept that has
+    no meaning for an object store, where the key is one flat string. The
+    equivalent guard here is that the key must be a plain filename: no
+    separators, no ``.`` or ``..``. FastAPI's path converter already refuses a
+    key containing ``/``, so this is defence in depth rather than the only
+    check, and it keeps the two backends refusing the *same* inputs.
+    """
+    if not object_key or "/" in object_key or "\\" in object_key or object_key in {".", ".."}:
+        raise UnsafeObjectKeyError(f"unsafe cover object key: {object_key!r}")
+    return f"{base_url.rstrip('/')}/{quote(object_key)}"
+
+
+# `response_model=None`: the return type is a union of two Response classes,
+# which FastAPI would otherwise try to turn into a Pydantic response model.
+# Neither branch returns JSON — one streams a file, the other redirects.
+@router.get("/{object_key}", response_model=None)
 def get_cover(
-    object_key: str, storage: LocalFileStorage = Depends(get_cover_storage)
-) -> FileResponse:
+    object_key: str,
+    request: Request,
+    storage: LocalFileStorage = Depends(get_cover_storage),
+) -> FileResponse | RedirectResponse:
+    """Serve a cover, or point the browser at whoever does.
+
+    The route contract is identical either way — ``GET /api/v1/covers/{key}``
+    — which is what lets storage move without touching the frontend (spec §20
+    forbids the frontend constructing cover paths, precisely so this stays
+    swappable).
+
+    With ``cover_storage_backend='s3'`` the API answers with a redirect rather
+    than bytes. That is the whole point: 1.1 GB of images across ~102k files
+    is served by a CDN with free egress instead of by a container that is
+    billed per second and scales to zero.
+    """
+    settings = request.app.state.settings
+    if settings.cover_storage_backend == "s3":
+        base_url = settings.cover_storage_public_base_url
+        if not base_url:  # pragma: no cover - Settings validation forbids this
+            raise CoverNotFoundError
+        try:
+            url = _public_cover_url(base_url, object_key)
+        except UnsafeObjectKeyError as exc:
+            raise CoverNotFoundError from exc
+        # 307 rather than 301: the mapping from key to origin is configuration,
+        # not a permanent fact about the resource, and a 301 would be cached by
+        # browsers essentially forever — including through a bucket change.
+        return RedirectResponse(
+            url,
+            status_code=307,
+            headers={"Cache-Control": f"public, max-age={_REDIRECT_CACHE_SECONDS}"},
+        )
+
     try:
         path = storage.resolve(object_key)
     except UnsafeObjectKeyError as exc:

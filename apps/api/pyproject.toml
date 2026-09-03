@@ -21,6 +21,10 @@ dependencies = [
     "numpy>=2.0",
     "argon2-cffi>=23.1",
     "pyjwt>=2.9",
+    # S3-compatible object storage client. Used to fetch model artifacts at
+    # startup when ARTIFACT_STORAGE_BACKEND=s3 (Cloudflare R2 today, real AWS
+    # S3 by changing one endpoint URL — see shared/storage/s3_artifacts.py).
+    "boto3>=1.35",
     "book-recommender-engine",
 ]
 
@@ -97,6 +101,15 @@ disallow_untyped_defs = false
 # phases. Adding a module to the training group means adding it here too.
 [[tool.mypy.overrides]]
 module = ["implicit.*", "scipy.*", "torch.*", "sentence_transformers.*"]
+ignore_missing_imports = true
+
+# boto3/botocore ship no type stubs (the typed `boto3-stubs` package is a
+# separate, very large dependency that would only serve the ~10 lines in
+# shared/storage/s3_artifacts.py). That module defines its own `_ObjectGetter`
+# Protocol for the slice of the client it actually uses, so the typing that
+# matters to callers is checked regardless.
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

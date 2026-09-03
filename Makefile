@@ -10,6 +10,7 @@ LOCAL_PGHOST := localhost
         db-start db-stop db-shell \
         migrate import-data import-data-dry-run seed-demo build-popularity \
         build-source-similarity build-item-metadata build-recommender-artifacts \
+        upload-artifacts upload-artifacts-dry-run \
         build-als build-item-cf build-content setup-training \
         inspect-recommender-profile evaluate-content evaluate-recommender \
         test lint typecheck e2e generate-api-client
@@ -116,6 +117,12 @@ evaluate-recommender: ## Evaluate the assembled pipeline: USERNAME=<name> [ARGS=
 inspect-recommender-profile: ## Inspect a user's semantic interest profile: USERNAME=<name> [ARGS=--json]
 	@test -n "$(USERNAME)" || (echo "error: USERNAME=<name> is required" >&2; exit 1)
 	cd apps/api && uv run python -m book_app.cli.inspect_profile --username "$(USERNAME)" $(ARGS)
+
+upload-artifacts: ## Upload built artifacts to S3-compatible object storage (needs ARTIFACT_STORAGE_S3_* env)
+	cd apps/api && uv run python -m book_app.cli.upload_artifacts
+
+upload-artifacts-dry-run: ## Show what upload-artifacts would send, without sending it
+	cd apps/api && uv run python -m book_app.cli.upload_artifacts --dry-run
 
 build-recommender-artifacts: build-popularity build-source-similarity build-item-metadata build-als build-item-cf build-content ## Build every recommender artifact currently implemented
 	@echo "Recommender artifacts rebuilt. Note: 'make import-data' invalidates them (see ADR-0014)."

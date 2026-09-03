@@ -24,6 +24,7 @@ from pathlib import Path
 from book_recommender.artifacts import CatalogSnapshot, LocalArtifactStorage
 from sqlalchemy.orm import Session
 
+from book_app.core.config import Settings
 from book_app.modules.books import repository as books_repository
 
 _REPO_ROOT = Path(__file__).resolve().parents[6]
@@ -35,8 +36,25 @@ def resolve_artifact_root(configured_path: Path) -> Path:
     return (_REPO_ROOT / configured_path).resolve()
 
 
-def build_artifact_storage(configured_path: Path) -> LocalArtifactStorage:
-    return LocalArtifactStorage(resolve_artifact_root(configured_path))
+def build_artifact_storage(settings: Settings) -> LocalArtifactStorage:
+    """The artifact storage root, honouring the configured backend.
+
+    ``local`` reads the repo-relative directory the builders write to.
+    ``s3`` first materialises every family from the object store into
+    ``settings.artifact_cache_dir`` and then reads *that* — see
+    ``book_app.shared.storage.s3_artifacts`` for why remote artifacts are
+    synced to disk rather than hidden behind a polymorphic storage class.
+
+    Until this took ``Settings`` it took a path, so the ``s3`` branch of
+    ``artifact_storage_backend`` was unreachable: the setting existed, was
+    typed, was documented, and did nothing. Selecting the backend in one
+    place is what makes it real.
+    """
+    if settings.artifact_storage_backend == "s3":
+        from book_app.shared.storage.s3_artifacts import sync_artifacts
+
+        return LocalArtifactStorage(sync_artifacts(settings))
+    return LocalArtifactStorage(resolve_artifact_root(settings.artifact_storage_local_path))
 
 
 def read_catalog_snapshot(session: Session) -> CatalogSnapshot:

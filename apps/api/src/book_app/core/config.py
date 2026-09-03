@@ -85,15 +85,36 @@ class Settings(BaseSettings):
     general_rate_limit_window_seconds: float = 60.0
     max_request_body_bytes: int = 1_000_000
 
-    # --- Cover storage (Phase 2) ---
+    # --- Cover storage ---
+    #: ``local`` streams bytes off disk. ``s3`` redirects the browser to
+    #: ``cover_storage_public_base_url`` instead, so image traffic never
+    #: touches the API at all (ADR-0011 anticipated exactly this swap).
     cover_storage_backend: Literal["local", "s3"] = "local"
     cover_storage_local_path: Path = Path("data/processed/covers")
     cover_storage_s3_bucket: str | None = None
+    #: Public origin serving the covers bucket, e.g. an R2 ``pub-*.r2.dev``
+    #: domain or a CDN in front of it. No credentials: these bytes are public
+    #: by design (the same cover for every visitor, ADR-0011).
+    cover_storage_public_base_url: str | None = None
 
-    # --- Artifact storage (behavior lands in Phase 5) ---
+    # --- Artifact storage ---
+    #: ``s3`` means "any S3-compatible object store" — Cloudflare R2 today
+    #: (via ``artifact_storage_s3_endpoint_url``), real AWS S3 by leaving that
+    #: endpoint unset. Deliberately not named ``r2``: the protocol is the
+    #: portable thing, the provider is a URL.
     artifact_storage_backend: Literal["local", "s3"] = "local"
     artifact_storage_local_path: Path = Path("data/artifacts")
     artifact_storage_s3_bucket: str | None = None
+    #: Omit for real AWS S3; set for R2/MinIO/any S3-compatible endpoint.
+    artifact_storage_s3_endpoint_url: str | None = None
+    artifact_storage_s3_access_key_id: str | None = None
+    artifact_storage_s3_secret_access_key: str | None = None
+    #: Optional key prefix, so one bucket can hold more than this app.
+    artifact_storage_s3_prefix: str = ""
+    #: Where remote artifacts are materialised before the loaders mmap them.
+    #: On Cloud Run this is a tmpfs (RAM), which is why the downloaded bytes
+    #: count against the memory limit — see docs/architecture/recommender.md.
+    artifact_cache_dir: Path = Path("/tmp/bookshelf-artifacts")
 
     # --- Recommendation provider selection ---
     #: ``pipeline`` is the real funnel (R8). It replaced the
@@ -118,6 +139,36 @@ class Settings(BaseSettings):
 
     # --- Demo toggle (behavior lands in Phase 4/9); must never be true in production ---
     demo_mode_enabled: bool = False
+
+    @model_validator(mode="after")
+    def _require_complete_object_storage_config(self) -> Self:
+        """A remote storage backend must be fully configured or refuse to boot.
+
+        The failure this prevents is the quiet one: ``ARTIFACT_STORAGE_BACKEND=s3``
+        with a missing credential used to be indistinguishable at runtime from
+        "artifacts unavailable, degrade to popularity" — the app would come up
+        green and serve worse recommendations forever. A deployment that *asked*
+        for remote storage and cannot have it is misconfigured, not degraded.
+        """
+        if self.cover_storage_backend == "s3" and not self.cover_storage_public_base_url:
+            raise ValueError("cover_storage_backend='s3' requires COVER_STORAGE_PUBLIC_BASE_URL")
+        if self.artifact_storage_backend != "s3":
+            return self
+        missing = [
+            name
+            for name, value in (
+                ("ARTIFACT_STORAGE_S3_BUCKET", self.artifact_storage_s3_bucket),
+                ("ARTIFACT_STORAGE_S3_ACCESS_KEY_ID", self.artifact_storage_s3_access_key_id),
+                (
+                    "ARTIFACT_STORAGE_S3_SECRET_ACCESS_KEY",
+                    self.artifact_storage_s3_secret_access_key,
+                ),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError("artifact_storage_backend='s3' requires: " + ", ".join(missing))
+        return self
 
     @model_validator(mode="after")
     def _reject_insecure_production_defaults(self) -> Self:
